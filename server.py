@@ -81,7 +81,7 @@ async def lifespan(app: fastapi.FastAPI):
                     "--disable-blink-features=AutomationControlled"
                 ],
                 new_context_config=BrowserContextConfig(
-                    allowed_domains=["*"],
+                    allowed_domains=["*google.com*"],
                     cookies_file=None,
                     maximum_wait_page_load_time=60,
                     disable_security=False,
