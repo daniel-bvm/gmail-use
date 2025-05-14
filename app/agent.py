@@ -21,22 +21,31 @@ logger = logging.getLogger()
 
 
 async def get_agent(task: str, ctx: BrowserContext) -> Agent:
+    controller = get_controler()
+    llm = ChatOpenAI(
+        model=os.getenv("LLM_MODEL_ID", 'local-llm'),
+        openai_api_base=os.getenv("LLM_BASE_URL", 'http://localhost:65534/v1'),
+        openai_api_key=os.getenv("LLM_API_KEY", 'no-need'),
+        temperature=0.2
+    )
+    
     return Agent(
         task=task,
-        llm=ChatOpenAI(
-            model=os.getenv("LLM_MODEL_ID", 'local-llm'),
-            openai_api_base=os.getenv("LLM_BASE_URL", 'http://localhost:65534/v1'),
-            openai_api_key=os.getenv("LLM_API_KEY", 'no-need'),
-        ),
-        page_extraction_llm=None,
-        planner_llm=None,
+
+        llm=llm,
+        planner_llm=llm,
+        page_extraction_llm=llm,
+
         browser_context=ctx,
-        controller=get_controler(),
+        controller=controller,
+
         extend_system_message=get_system_prompt(),
+        extend_planner_system_message=get_system_prompt(),
+
         is_planner_reasoning=False,
-        use_vision=True,
-        use_vision_for_planner=True,
-        enable_memory=False
+        use_vision=False,
+        use_vision_for_planner=False,
+        enable_memory=False,
     )
 
 async def browse(task_query: str, ctx: BrowserContext, **_) -> AsyncGenerator[str, None]:

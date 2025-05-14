@@ -1,5 +1,5 @@
 import logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 
 import fastapi
 import uvicorn
@@ -83,7 +83,7 @@ async def lifespan(app: fastapi.FastAPI):
                 new_context_config=BrowserContextConfig(
                     allowed_domains=["*google.com*"],
                     cookies_file=None,
-                    maximum_wait_page_load_time=60,
+                    maximum_wait_page_load_time=5,
                     disable_security=False,
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
                     viewport=dict(
