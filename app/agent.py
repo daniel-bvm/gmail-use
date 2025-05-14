@@ -2,52 +2,57 @@ from typing import AsyncGenerator
 from langchain_openai import ChatOpenAI
 import os
 from .callbacks import (
-    on_task_completed, 
-    on_task_start
+    on_step_end, 
+    on_step_start
 )
 
 from browser_use import Agent
 from browser_use.browser.context import BrowserContext
 from .controllers import get_controler
 from .models import browser_use_custom_models
-from .utils import get_system_prompt, repair_json_no_except
+from .utils import get_system_prompt, repair_json_no_except, refine_chat_history
 import logging
 import openai
 import json
+from .signals import UnauthorizedAccess
+
 
 logger = logging.getLogger()
 
-async def browse(task_query: str, ctx: BrowserContext, **_) -> AsyncGenerator[str, None]:
 
-    controller = get_controler()
-    system_prompt = get_system_prompt()
-
-    model = ChatOpenAI(
-        model=os.getenv("LLM_MODEL_ID", 'local-llm'),
-        openai_api_base=os.getenv("LLM_BASE_URL", 'http://localhost:65534/v1'),
-        openai_api_key=os.getenv("LLM_API_KEY", 'no-need'),
-    )
-
-    current_agent = Agent(
-        task=task_query,
-        llm=model,
-        page_extraction_llm=model,
-        planner_llm=model,
+async def get_agent(task: str, ctx: BrowserContext) -> Agent:
+    return Agent(
+        task=task,
+        llm=ChatOpenAI(
+            model=os.getenv("LLM_MODEL_ID", 'local-llm'),
+            openai_api_base=os.getenv("LLM_BASE_URL", 'http://localhost:65534/v1'),
+            openai_api_key=os.getenv("LLM_API_KEY", 'no-need'),
+        ),
+        page_extraction_llm=None,
+        planner_llm=None,
         browser_context=ctx,
-        controller=controller,
-        extend_system_message=system_prompt,
-
+        controller=get_controler(),
+        extend_system_message=get_system_prompt(),
         is_planner_reasoning=False,
         use_vision=True,
         use_vision_for_planner=True,
         enable_memory=False
     )
 
-    res = await current_agent.run(
-        max_steps=40,
-        on_step_start=on_task_start, 
-        on_step_end=on_task_completed
-    )
+async def browse(task_query: str, ctx: BrowserContext, **_) -> AsyncGenerator[str, None]:
+    current_agent = await get_agent(task=task_query, ctx=ctx) 
+
+    try:
+        res = await current_agent.run(
+            max_steps=40,
+            on_step_start=on_step_start, 
+            on_step_end=on_step_end
+        )
+
+    except UnauthorizedAccess as err:
+        logger.info(f"Unauthorized access: {err}")
+        yield "Let's sign in to your account first, then notify me once you finish.\n\n"
+        return 
 
     final_result = res.final_result()
 
@@ -61,12 +66,14 @@ async def browse(task_query: str, ctx: BrowserContext, **_) -> AsyncGenerator[st
             if parsed.status == "pending":
                 logger.info(f"Completed task in status {parsed.status}")
 
-            yield parsed.message
+            yield parsed.message + '\n\n'
         except Exception as err:
             logger.info(f"Exception raised while parsing final answer: {err}")
-            yield f"task {task_query!r} completed!"
+            yield f"Exception raised: {err}\n\n"
+    else:
+        logger.info("Final result is None")
+        yield "I've done my task!"
 
-    yield f"task {task_query!r} completed"
 
 async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext, **_) -> AsyncGenerator[str, None]:
     functions = [
@@ -98,7 +105,7 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
 
     completion = await llm.chat.completions.create(
         model=os.getenv("LLM_MODEL_ID", 'local-llm'),
-        messages=messages,
+        messages=await refine_chat_history(messages, get_system_prompt()),
         tools=functions,
         tool_choice="auto",
         max_tokens=256

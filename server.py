@@ -58,7 +58,6 @@ async def lifespan(app: fastapi.FastAPI):
         )
     ]
     
-    
     try:
         for command in commands:
             logger.info(f"Executing {command}")
@@ -75,16 +74,17 @@ async def lifespan(app: fastapi.FastAPI):
         browser = Browser(
             config=BrowserConfig(
                 headless=False,
-                disable_security=True,
+                disable_security=False,
                 extra_browser_args=[
                     "--start-maximized",
                     "--homepage=https://www.google.com",
+                    "--disable-blink-features=AutomationControlled"
                 ],
                 new_context_config=BrowserContextConfig(
                     allowed_domains=["*"],
                     cookies_file=None,
                     maximum_wait_page_load_time=60,
-                    disable_security=True,
+                    disable_security=False,
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
                     viewport=dict(
                         width=BROWSER_WINDOW_SIZE_WIDTH,

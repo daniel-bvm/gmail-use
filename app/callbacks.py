@@ -1,14 +1,21 @@
 from browser_use import Agent
 import logging
+from .signals import UnauthorizedAccess
+
 
 logger = logging.getLogger()
 
-async def on_task_start(agent: Agent) -> Agent: 
+async def on_step_start(agent: Agent) -> Agent: 
     logger.info("on_agent_start: reached")
-    # custom your logic here
+
+
     return agent
 
-async def on_task_completed(agent: Agent) -> Agent:
+async def on_step_end(agent: Agent) -> Agent:
     logger.info("on_task_completed: reached")
-    # custom your logic here
+    current_page = await agent.browser_context.get_current_page()
+    
+    if 'accounts.google.com/v3/signin/identifier' in current_page.url:
+        raise UnauthorizedAccess("Unauthorized access: Google sign-in page detected.") 
+
     return agent
