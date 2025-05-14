@@ -37,7 +37,8 @@ run git clone https://github.com/novnc/noVNC.git /opt/novnc && \
     chmod +x /opt/novnc/utils/novnc_proxy
 
 copy requirements.txt .
-run pip install -r requirements.txt --no-cache-dir && patchright install chromium
+run --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt --no-cache-dir
+run patchright install chromium
 workdir /workspace
 
 copy app app
