@@ -1,10 +1,16 @@
 from io import StringIO
 import sys
 from json_repair import repair_json
-import logging 
+import logging
 import datetime
 import os
 import base64
+from .models.oai_compatible_models import ChatCompletionStreamResponse
+import json
+import time
+from typing import Any
+from pydantic import BaseModel
+import uuid
 
 logger = logging.getLogger()
 
@@ -120,7 +126,60 @@ async def refine_chat_history(messages: list[dict[str, str]], system_prompt: str
             "content": refined_messages[-1]
         }
 
-    # current_time_utc_str = datetime.datetime.now(tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    # refined_messages[-1]['content'] += f'\nCurrent time is {current_time_utc_str} UTC'
+    current_time_utc_str = datetime.datetime.now(tz=datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    refined_messages[-1]['content'] += f'\nCurrent time is {current_time_utc_str} UTC'
 
     return refined_messages
+
+async def to_chunk_data(chunk: ChatCompletionStreamResponse) -> bytes:
+    return ("data: " + json.dumps(chunk.model_dump()) + "\n\n").encode()
+
+async def done_token() -> bytes:
+    return "data: [DONE]\n\n".encode()
+
+async def refine_mcp_response(something: Any) -> str:
+    if isinstance(something, dict):
+        return {
+            k: await refine_mcp_response(v)
+            for k, v in something.items()
+        }
+
+    elif isinstance(something, (list, tuple)):
+        return [
+            await refine_mcp_response(v)
+            for v in something
+        ]
+
+    elif isinstance(something, BaseModel):
+        return something.model_dump()
+
+    return something
+
+async def wrap_chunk(uuid: str, raw: str, role="assistant") -> ChatCompletionStreamResponse:
+    return ChatCompletionStreamResponse(
+        id=uuid,
+        object='chat.completion.chunk',
+        created=int(time.time()),
+        model='unspecified',
+        choices=[
+            dict(
+                index=0,
+                delta=dict(
+                    content=raw,
+                    role=role
+                )
+            )
+        ]
+    )
+    
+async def refine_assistant_message(
+    assistant_message: dict[str, str]
+) -> dict[str, str]:
+
+    if 'content' in assistant_message:
+        assistant_message['content'] = assistant_message['content'] or ""
+
+    return assistant_message
+    
+def random_uuid() -> str:
+    return str(uuid.uuid4())

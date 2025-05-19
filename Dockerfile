@@ -1,4 +1,4 @@
-from python:3.11
+from python:3.12
 
 env DEBIAN_FRONTEND=noninteractive
 env DISPLAY=:99

@@ -57,7 +57,7 @@ async def lifespan(app: fastapi.FastAPI):
             no_vnc_port=NO_VNC_PORT
         )
     ]
-    
+
     try:
         for command in commands:
             logger.info(f"Executing {command}")
@@ -68,7 +68,7 @@ async def lifespan(app: fastapi.FastAPI):
                 shell=True,
                 executable="/bin/bash"
             )
-            
+
             processes.append(p)
 
         browser = Browser(
@@ -111,7 +111,7 @@ async def lifespan(app: fastapi.FastAPI):
             try:
                 process.kill()
             except: pass
-        
+
         if _GLOBALS.get('browser_context'):
             try:
                 await _GLOBALS['browser_context'].__aexit__(None, None, None)
