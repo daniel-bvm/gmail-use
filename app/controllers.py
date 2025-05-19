@@ -58,8 +58,10 @@ _controller = Controller(
             'scroll_up',
             'send_keys',
             # 'scroll_to_text',
-            # 'get_dropdown_options',
-            # 'select_dropdown_option',
+
+            'get_dropdown_options',
+            'select_dropdown_option',
+
             # 'drag_drop',
             # 'get_sheet_contents',
             # 'select_cell_or_range',
@@ -85,22 +87,22 @@ async def check_authorization(ctx: BrowserContext) -> bool:
 
     return False
 
-
 async def ensure_url(ctx: BrowserContext, pat: str) -> None:
     page = await ctx.get_current_page()
     current_url = page.url
 
     if not fnmatch(current_url, pat):
-        await page.goto(pat, wait_until='networkidle0')
+        await page.goto(pat, wait_until='networkidle')
 
 @_controller.action('Sign out Google account')
 async def sign_out(browser: BrowserContext):
-    page = await browser.get_current_page()
+    sites = ['accounts.google.com', 'mail.google.com']
 
-    await page.goto(
-        'https://accounts.google.com/signout/chrome/landing', 
-        wait_until='networkidle0'
-    )
+    for site in sites:
+        await browser.session.context.clear_cookies(domain=site)
+        
+    page = await browser.get_current_page()
+    await page.reload(wait_until='networkidle')
 
     return ActionResult(extracted_content='Sign out successful!')
 
@@ -110,31 +112,32 @@ async def open_mail_box(browser: BrowserContext):
     
     await page.goto(
         'https://mail.google.com/mail/u/0/', 
-        wait_until='networkidle'
+        wait_until='networkidle' # networkidle
     )
 
     return ActionResult(extracted_content='Navigated to input box')
 
-@_controller.action('Filter mail by criteria')
-async def filter_mail(
-    browser: BrowserContext, 
-    by_sender: str = None, 
-    tag: Literal['inbox', 'sent', 'drafts', 'spam', 'trash', 'important', 'primary', 'promotion', 'social', 'unread'] = 'inbox'
-):
+@_controller.action('Craft a new email')
+async def fill_email_form(browser: BrowserContext, subject: str, body: str, recipient: str):
     page = await browser.get_current_page()
 
-    if by_sender is not None:
-        pass
+    await page.fill('input[aria-label="To recipients"]', recipient)
+    await page.fill('input[name="subjectbox"]', subject)
+    await page.fill('div[aria-label="Message Body"]', body)
 
-    return ActionResult(extracted_content='Navigated to input box')
+    return ActionResult(extracted_content='Email form filled successfully!')
 
+@_controller.action('Search email')
+async def search_email(browser: BrowserContext, query: str):
+    page = await browser.get_current_page()
 
-@_controller.action('Ask for user confirmation before proceeding')
-async def wait_for_user_confirmation(
-    message: str,
-    browser: BrowserContext
-):
-    return message
+    # Wait for the search box to be available
+    await page.wait_for_selector('input[name="q"]', timeout=5000)
+    await page.fill('input[name="q"]', query)
+    await page.click('button[aria-label="Search mail"]')
+    await page.wait_for_timeout(2000)
+
+    return ActionResult(extracted_content='Search executed successfully!')
 
 def get_controler():
     global _controller

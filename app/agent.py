@@ -26,7 +26,7 @@ from .signals import UnauthorizedAccess
 import openai
 from typing import Optional, Any
 import httpx
-import traceback
+from datetime import datetime, timedelta
 
 logger = logging.getLogger()
 
@@ -57,32 +57,34 @@ async def get_agent(task: str, ctx: BrowserContext, controller: Controller=None)
 
         browser_context=ctx,
         controller=controller,
+        planner_interval=1,
 
         extend_system_message=get_system_prompt(),
         extend_planner_system_message=planner_extend_system_message,
 
         is_planner_reasoning=False,
-        use_vision=False,
-        use_vision_for_planner=False,
+        use_vision=True,
+        use_vision_for_planner=True,
 
         tool_calling_method='function_calling',
+        max_actions_per_step=2,
 
         # @TODO: fix this bug
         enable_memory=False, # bug here
-        memory_config=MemoryConfig(
-            agent_id="gmail-use-agent",
-            memory_interval=5,
-            embedder_provider='openai',
-            embedder_model=os.getenv("EMBEDDING_MODEL_ID", 'text-embedding-3-small'),
-            embedder_dims=int(os.getenv("EMBEDDING_DIMS", 256))
-        )        
+        # memory_config=MemoryConfig(
+        #     agent_id="gmail-use-agent",
+        #     memory_interval=5,
+        #     embedder_provider='openai',
+        #     embedder_model=os.getenv("EMBEDDING_MODEL_ID", 'text-embedding-3-small'),
+        #     embedder_dims=int(os.getenv("EMBEDDING_DIMS", 256))
+        # )        
     )
 
-async def browse(task_query: str, ctx: BrowserContext, **_) -> AsyncGenerator[str, None]:
+async def browse(task_query: str, ctx: BrowserContext, max_steps:int = 40, **_) -> AsyncGenerator[str, None]:
     current_agent = await get_agent(task=task_query, ctx=ctx) 
 
     res = await current_agent.run(
-        max_steps=40,
+        max_steps=max_steps,
         on_step_start=on_step_start, 
         on_step_end=on_step_end
     )
@@ -119,16 +121,16 @@ class IncrementID(object):
 
 async def get_emails(
     ctx: BrowserContext,
-    date: Optional[str]=None, 
-    date_within: Optional[str]=None,
+    from_date: Optional[str]=None, 
+    to_date: Optional[str]=None,
     sender: Optional[str]=None, 
+    recipient: Optional[str]=None,
     include_words: Optional[str]="", 
     has_attachment: Optional[bool]=False,
-    additional_message: Optional[str]=None
 ) -> AsyncGenerator[str, None]:
     gen_id = IncrementID()
 
-    task = ''
+    task = 'Strictly follow the steps below to complete the task:\n\n'
     
     page = await ctx.get_current_page()
     url = page.url
@@ -136,31 +138,32 @@ async def get_emails(
     if not fnmatch(url, 'https://mail.google.com/*'):
         task += f'{gen_id()}. navigate to mail.google.com or use open_mail_box to open the mail box\n'
 
-    if date or date_within or sender or include_words or has_attachment:
-        task += f"{gen_id()}. Open the advance search panel in Gmail\n"
+    if from_date or to_date or sender or include_words or has_attachment or recipient:
+        query_str = f'{include_words}'
 
-        if date:
-            date_within = date_within or '1 day'
+        if from_date:
+            query_str += f' after:{from_date}'
 
-            task += f"{gen_id()}. Set the date to {date} in format (yyyy/mm/dd)\n"
-            task += f"{gen_id()}. In the 'Date within' dropdown list, select {date_within} or a similar option that has close meaning to {date_within}\n"
-  
+        if to_date:
+            if to_date == from_date:
+                to_date_obj = datetime.strptime(to_date, '%Y/%m/%d')
+                correct_to_date = to_date_obj + timedelta(days=1)
+                to_date = correct_to_date.strftime('%Y/%m/%d')
+
+            query_str += f' before:{to_date}'
+
         if sender:
-            task += f"{gen_id()}. fill 'From' field with {sender}\n"
+            query_str += f' from:{sender}'
 
-        if include_words:
-            task += f"{gen_id()}. fill the 'Has the words' field with {include_words}\n"
+        if recipient:
+            query_str += f' to:{recipient}'
 
         if has_attachment:
-            task += f"{gen_id()}. check the 'Has attachment' checkbox\n"
-            
-        task += f"{gen_id()}. Click the search button to perform the search and wait until the filtering is done\n"
+            query_str += ' has:attachment'
 
-    if not additional_message:
-        task += f"{gen_id()}. Extract the results in the center of the current page, summarize and response back to the user, including senders, subject, time received. No need to get details of each e-mail\n"
+        task += f"{gen_id()}. Perform searching by executing search_email with the the query: {query_str!r}\n"
 
-    else:
-        task += f"{gen_id()}. Extract the results in the center of the current page, summarize and response back to the user, including senders, subject, time received. Do the additional request by the user: {additional_message!r}\n"
+    task += f"{gen_id()}. Extract emails from the current page including name of the senders, subject and time the email was sent.\n"
 
     async for msg in browse(task, ctx):
         yield msg
@@ -170,31 +173,40 @@ async def send_email(
     recipient: str, 
     subject: str, 
     body: str,
-    sign: Optional[str] = None
+    required_user_confirmation: Optional[bool]=True,
 ) -> AsyncGenerator[str, None]:
     gen_id = IncrementID()
-    task = ''
+    
+    dest = 'prepare an email' if required_user_confirmation else 'send an email' 
+    task = f'Strictly follow the steps below to {dest}:\n\n'
 
     page = await ctx.get_current_page()
     url = page.url
 
     if not fnmatch(url, 'https://mail.google.com/*'):
-        task += f'{gen_id()}. navigate to mail.google.com\n'
+        task += f'{gen_id()}. Navigate to mail.google.com\n'
 
-    task += f"{gen_id()}. Click the 'Compose' button to open a new email window\n"
-    task += f"{gen_id()}. Fill the 'To' field with {recipient!r}\n"
-    task += f"{gen_id()}. Fill the 'Subject' field with {subject!r}\n"
-    task += f"{gen_id()}. Fill the email body with {body!r}\n"
-    
-    if sign:
-        task += f"{gen_id()}. Use the following signature: {sign!r}\n"
+    form_data = {
+        "recipient": recipient,
+        "subject": subject,
+        "body": body
+    }
+
+    task += f"{gen_id()}. Click the Compose button to open the new-email form\n"
+    task += f"{gen_id()}. use fill_email_form with the following arguments:\n" 
+    task += f"```json\n{json.dumps(form_data, indent=2)}\n```\n"
+
+    if not required_user_confirmation:
+        task += f"{gen_id()}. Click Send\n"
 
     else:
-        task += f"{gen_id()}. Re-check all information above, then halt and wait for user manual execution\n"
+        task += f"{gen_id()}. Do not click the send button. Let the user do it manually\n"
+
+    task += f"\nImportant: Do not try to fill the form manually yourself"
 
     async for msg in browse(task, ctx):
         yield msg
-        
+
 async def sign_out(
     ctx: BrowserContext
 ) -> AsyncGenerator[str, None]:
@@ -203,26 +215,12 @@ async def sign_out(
 
     task += f"{gen_id()}. Use sign_out tool to sign out the current account (MUST USE)\n"
 
-    async for msg in browse(task, ctx):
-        yield msg
-        
-async def call_llm(messages: list[dict[str, str]], tools: list[dict[str, Any]], max_tokens: int):
-    llm = openai.AsyncClient(
-        base_url=os.getenv("LLM_BASE_URL", "http://localhost:65534/v1"),
-        api_key=os.getenv("LLM_API_KEY", "no-need")
-    )
+    try:
+        async for msg in browse(task, ctx):
+            yield msg
 
-    model_id = os.getenv("LLM_MODEL_ID", 'local-llm')
-
-    completion = await llm.chat.completions.create(
-        model=model_id,
-        messages=messages,
-        tools=tools,
-        tool_choice="auto",
-        max_tokens=max_tokens
-    )
-
-    return completion
+    except UnauthorizedAccess as e:
+        yield "Account is successfully signed out!"
 
 async def execute_openai_compatible_toolcall(
     ctx: BrowserContext,
@@ -248,6 +246,18 @@ async def execute_openai_compatible_toolcall(
             yield msg
             
         return
+    
+    if name == "xbrowse":
+        task = args.get("task", "")
+
+        if not task:
+            yield "No task provided for xbrowse tool call."
+            return
+
+        async for msg in browse(task, ctx):
+            yield msg
+            
+        return
 
     yield f"Unknown tool call: {name}; Available tools are: get_emails, send_email"
 
@@ -261,17 +271,21 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "date": {
+                        "from_date": {
                             "type": ["string", "null"],
-                            "description": "The date to filter emails by, in format (yyyy/mm/dd)."
+                            "description": "The starting date to filter emails by, in format (yyyy/mm/dd)."
                         },
-                        "date_within": {
+                        "to_date": {
                             "type": ["string", "null"],
-                            "description": "The time period to filter emails by, e.g., '1 day', '1 week'."
+                            "description": "The ending date to filter emails by, in format (yyyy/mm/dd). If not provided, it defaults to the current date."
                         },
                         "sender": {
                             "type": ["string", "null"],
                             "description": "Filter emails by sender's email address."
+                        },
+                        "recipient": {
+                            "type": ["string", "null"],
+                            "description": "Filter emails by recipient's email address."
                         },
                         "include_words": {
                             "type": ["string", "null"],
@@ -280,10 +294,6 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
                         "has_attachment": {
                             "type": ["boolean", "null"],
                             "description": "Whether to filter emails that have attachments."
-                        },
-                        "additional_message": {
-                            "type": ["string", "null"],
-                            "description": "Optional additional message to include in the response."
                         }
                     },
                     "required": [],
@@ -312,9 +322,9 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
                             "type": "string",
                             "description": "The body content of the email."
                         },
-                        "sign": {
+                        "required_user_confirmation": {
                             "type": ["string", "null"],
-                            "description": "Optional signature to append to the email body."
+                            "description": "let the user confirm and send it manually. Default to 'true'"
                         }
                     },
                     "required": ["recipient", "subject", "body"],
@@ -326,8 +336,27 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
         {
             "type": "function",
             "function": {
+                "name": "xbrowse",
+                "description": "Ask xbrowser to do a task in the browser like replying an email or anything that there is no tools to execute, etc.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": "Task description to execute in browser. It should be as much detail as possible, step-by-step to achieve the task."
+                        }    
+                    },
+                    "required": ["task"],
+                    "additionalProperties": False
+                },
+                "strict": True
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "sign_out",
-                "description": "Sign out to the current account.",
+                "description": "Sign out.",
                 "parameters": {
                     "type": "object",
                     "properties": {},
@@ -336,12 +365,12 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
                 },
                 "strict": False
             }
-        }
+        },
+        
     ]
 
-    if not await check_authorization(browser_context):
+    if await check_authorization(browser_context):
         functions = functions[:-1] # remove sign_out function
-
     
     llm = openai.AsyncClient(
         base_url=os.getenv("LLM_BASE_URL", "http://localhost:65534/v1"),
