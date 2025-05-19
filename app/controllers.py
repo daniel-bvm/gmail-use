@@ -134,7 +134,7 @@ async def wait_for_user_confirmation(
     message: str,
     browser: BrowserContext
 ):
-    raise RequireUserConfirmation(message)
+    return message
 
 def get_controler():
     global _controller

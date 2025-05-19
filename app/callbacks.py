@@ -18,4 +18,5 @@ async def on_step_end(agent: Agent) -> Agent:
     if 'accounts.google.com/v3/signin/identifier' in current_page.url:
         raise UnauthorizedAccess("Unauthorized access: Google sign-in page detected.") 
 
+    print(agent.state)
     return agent

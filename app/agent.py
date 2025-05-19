@@ -17,7 +17,6 @@ from .utils import (
     refine_chat_history,
     to_chunk_data,
     refine_assistant_message,
-    done_token,
     wrap_chunk,
     random_uuid
 )
