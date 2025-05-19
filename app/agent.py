@@ -381,7 +381,8 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
                 yield await to_chunk_data(
                     await wrap_chunk(
                         response_uuid,
-                        f"Calling tool: {_name}...",
+                        f"**Calling**: {_name}...\n",
+                        role="tool",
                     )
                 )
                 
@@ -410,7 +411,7 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
                     yield await to_chunk_data(
                         await wrap_chunk(
                             response_uuid,
-                            f"Required log-in first. Pausing...",
+                            f"Required log-in first. Pausing...\n",
                             role="tool"
                         )
                     )
@@ -428,7 +429,7 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
 
                 if unauthorized:
                     break
-                
+
             need_toolcalls = calls < 10 and not unauthorized
 
             completion = await llm.chat.completions.create(
