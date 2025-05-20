@@ -7,13 +7,11 @@ from .callbacks import (
 )
 import json
 from browser_use import Agent
-from browser_use.agent.memory import MemoryConfig
 from browser_use.browser.context import BrowserContext
-from .controllers import get_controler, check_authorization, Controller
-from .models import browser_use_custom_models, oai_compatible_models
+from .controllers import get_controler, exclude as excluded_tools, check_authorization, Controller, search_email, ensure_url, fill_email_form, sign_out as sign_out_controller
+from .models import oai_compatible_models, gmail_use_custom_models
 from .utils import (
     get_system_prompt,
-    repair_json_no_except,
     refine_chat_history,
     to_chunk_data,
     refine_assistant_message,
@@ -24,9 +22,10 @@ import logging
 import openai
 from .signals import UnauthorizedAccess
 import openai
-from typing import Optional, Any
+from typing import Optional, List
 import httpx
 from datetime import datetime, timedelta
+import traceback
 
 logger = logging.getLogger()
 
@@ -90,24 +89,7 @@ async def browse(task_query: str, ctx: BrowserContext, max_steps:int = 40, **_) 
     )
 
     final_result = res.final_result()
-
-    if final_result is not None:
-        try:
-            parsed: browser_use_custom_models.FinalAgentResult \
-                = browser_use_custom_models.FinalAgentResult.model_validate_json(
-                    repair_json_no_except(final_result)
-                )
-
-            if parsed.status == "pending":
-                logger.info(f"Completed task in status {parsed.status}")
-
-            yield parsed.message + '\n\n'
-        except Exception as err:
-            logger.info(f"Exception raised while parsing final answer: {err}")
-            yield f"Exception raised: {err}\n\n"
-    else:
-        logger.info("Final result is None")
-        yield "I've done my task!"
+    yield final_result
 
 from fnmatch import fnmatch
 
@@ -130,13 +112,11 @@ async def get_emails(
 ) -> AsyncGenerator[str, None]:
     gen_id = IncrementID()
 
-    task = 'Strictly follow the steps below to complete the task:\n\n'
-    
-    page = await ctx.get_current_page()
-    url = page.url
+    if not await check_authorization(ctx):
+        await ensure_url(ctx, 'https://mail.google.com/')
+        raise UnauthorizedAccess("Please sign in to your Google account first.")
 
-    if not fnmatch(url, 'https://mail.google.com/*'):
-        task += f'{gen_id()}. navigate to mail.google.com or use open_mail_box to open the mail box\n'
+    await ensure_url(ctx, 'https://mail.google.com/')
 
     if from_date or to_date or sender or include_words or has_attachment or recipient:
         query_str = f'{include_words}'
@@ -161,9 +141,16 @@ async def get_emails(
         if has_attachment:
             query_str += ' has:attachment'
 
-        task += f"{gen_id()}. Perform searching by executing search_email with the the query: {query_str!r}\n"
+        await search_email(ctx, query_str)
 
-    task += f"{gen_id()}. Extract emails from the current page including name of the senders, subject and time the email was sent.\n"
+    task = 'Follow strictly the instructions below:\n'
+    task += f"{gen_id()}. Extract data from the current page.\n"
+    task += f"{gen_id()}. Done, no more actions required!\n"
+    
+    controller = Controller(
+        exclude_actions=excluded_tools,
+        output_model=List[gmail_use_custom_models.SimpleEmailObject]
+    )
 
     async for msg in browse(task, ctx):
         yield msg
@@ -175,52 +162,50 @@ async def send_email(
     body: str,
     required_user_confirmation: Optional[bool]=True,
 ) -> AsyncGenerator[str, None]:
-    gen_id = IncrementID()
-    
-    dest = 'prepare an email' if required_user_confirmation else 'send an email' 
-    task = f'Strictly follow the steps below to {dest}:\n\n'
 
+    if not await check_authorization(ctx):
+        await ensure_url(ctx, 'https://mail.google.com')
+        raise UnauthorizedAccess("Please sign in to your Google account first.")
+
+    await ensure_url(ctx, 'https://mail.google.com')
     page = await ctx.get_current_page()
-    url = page.url
 
-    if not fnmatch(url, 'https://mail.google.com/*'):
-        task += f'{gen_id()}. Navigate to mail.google.com\n'
+    compose_button = await page.query_selector('div[role="button"]:has-text("Compose")')
 
-    form_data = {
-        "recipient": recipient,
-        "subject": subject,
-        "body": body
-    }
+    if not compose_button:
+        yield "Can not perform sending mail at this moment, please try again later."
+        return
+    
+    for img_tag in await page.query_selector_all('img[aria-label="Save & close"]'):
+        if img_tag:
+            await img_tag.click()
+            await page.wait_for_timeout(0.2)
 
-    task += f"{gen_id()}. Click the Compose button to open the new-email form\n"
-    task += f"{gen_id()}. use fill_email_form with the following arguments:\n" 
-    task += f"```json\n{json.dumps(form_data, indent=2)}\n```\n"
+    await compose_button.click()
+    await page.wait_for_timeout(0.5)  # wait for the compose window to open
+    await fill_email_form(ctx, subject=subject, body=body, recipient=recipient)
 
-    if not required_user_confirmation:
-        task += f"{gen_id()}. Click Send\n"
-
+    if required_user_confirmation:
+        yield "Please confirm and send the email manually."
     else:
-        task += f"{gen_id()}. Do not click the send button. Let the user do it manually\n"
+        send_button = await page.query_selector('div[aria-label="Send ‪(Ctrl-Enter)‬"]')
 
-    task += f"\nImportant: Do not try to fill the form manually yourself"
+        if not send_button:
+            yield "Can not find the send button, please try do it manually."
+            return 
 
-    async for msg in browse(task, ctx):
-        yield msg
+        await send_button.click()
+        await page.wait_for_timeout(1)
+        yield "Email sent!"
 
 async def sign_out(
     ctx: BrowserContext
 ) -> AsyncGenerator[str, None]:
-    gen_id = IncrementID()
-    task = ''
-
-    task += f"{gen_id()}. Use sign_out tool to sign out the current account (MUST USE)\n"
-
-    try:
-        async for msg in browse(task, ctx):
-            yield msg
-
-    except UnauthorizedAccess as e:
-        yield "Account is successfully signed out!"
+    await sign_out_controller(ctx)
+    page = await ctx.get_current_page()
+    page.reload(wait_until='networkidle')
+    yield 'Sign out successful!'
+    
 
 async def execute_openai_compatible_toolcall(
     ctx: BrowserContext,
@@ -333,25 +318,25 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
                 "strict": False
             }
         },
-        {
-            "type": "function",
-            "function": {
-                "name": "xbrowse",
-                "description": "Ask xbrowser to do a task in the browser like replying an email or anything that there is no tools to execute, etc.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "task": {
-                            "type": "string",
-                            "description": "Task description to execute in browser. It should be as much detail as possible, step-by-step to achieve the task."
-                        }    
-                    },
-                    "required": ["task"],
-                    "additionalProperties": False
-                },
-                "strict": True
-            }
-        },
+        # {
+        #     "type": "function",
+        #     "function": {
+        #         "name": "xbrowse",
+        #         "description": "Ask xbrowser to do a task in the browser like replying an email or anything that there is no tools to execute, etc.",
+        #         "parameters": {
+        #             "type": "object",
+        #             "properties": {
+        #                 "task": {
+        #                     "type": "string",
+        #                     "description": "Task description to execute in browser. It should be as much detail as possible, step-by-step to achieve the task."
+        #                 }    
+        #             },
+        #             "required": ["task"],
+        #             "additionalProperties": False
+        #         },
+        #         "strict": True
+        #     }
+        # },
         {
             "type": "function",
             "function": {
@@ -384,6 +369,7 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
     calls = 0
     
     messages = await refine_chat_history(messages, get_system_prompt())
+    executed = set([])
 
     try:
         completion = await llm.chat.completions.create(
@@ -403,49 +389,54 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
             calls += len(completion.choices[0].message.tool_calls)
 
             for call in completion.choices[0].message.tool_calls:
-                _id, _name = call.id, call.function.name
+                _id, _name = call.id, call.function.name    
                 _args = json.loads(call.function.arguments)
-
-                yield await to_chunk_data(
-                    await wrap_chunk(
-                        response_uuid,
-                        f"**Calling**: {_name}...\n",
-                        role="tool",
-                    )
-                )
-                
                 result, unauthorized = '', False
-
-                try:
-
-                    async for msg in execute_openai_compatible_toolcall(
-                        ctx=browser_context, 
-                        name=_name,
-                        args=_args
-                    ):
-                        yield await to_chunk_data(
-                            await wrap_chunk(
-                                response_uuid,
-                                msg,
-                                role="tool"
-                            )
-                        )
-
-                        result += msg + '\n'
-
-                except UnauthorizedAccess as e:
-                    logger.warning(f"{e}")
-
+                
+                if _name in executed:
+                    result = f"Tool call `{_name}` has been executed before with the same arguments: {_args}. Skipping"
+                    
+                else:
+                    executed.add(_name)
                     yield await to_chunk_data(
                         await wrap_chunk(
                             response_uuid,
-                            f"Required log-in first. Pausing...\n",
-                            role="tool"
+                            f"**Calling**: {_name}...\n",
+                            role="tool",
                         )
                     )
-   
-                    result = f"Unauthorized access: {str(e)}\nNow, halt the current task and wait for the user to sign in manually. After then, Re-execute {_name} with these arguments: {_args}" 
-                    unauthorized = True
+
+                    try:
+
+                        async for msg in execute_openai_compatible_toolcall(
+                            ctx=browser_context, 
+                            name=_name,
+                            args=_args
+                        ):
+                            yield await to_chunk_data(
+                                await wrap_chunk(
+                                    response_uuid,
+                                    msg,
+                                    role="tool"
+                                )
+                            )
+
+                            if isinstance(msg, str):
+                                result += msg + '\n'
+
+                    except UnauthorizedAccess as e:
+                        logger.warning(f"{e}")
+
+                        yield await to_chunk_data(
+                            await wrap_chunk(
+                                response_uuid,
+                                f"Required log-in first. Pausing...\n",
+                                role="tool"
+                            )
+                        )
+    
+                        result = f"Unauthorized access: {str(e)}\nNow, halt the current task and wait for the user to sign in manually. After then, Re-execute {_name} with these arguments: {_args}" 
+                        unauthorized = True
 
                 messages.append(
                     {
@@ -477,7 +468,6 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
 
     except openai.APIConnectionError as e:
         error_message=f"Failed to connect to language model: {e}"
-        import traceback
         error_details = traceback.format_exc(limit=-6)
 
     except openai.RateLimitError as e:

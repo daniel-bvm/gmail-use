@@ -1,5 +1,17 @@
 import logging
-logging.basicConfig(level=logging.INFO)
+
+# print to file
+logging.basicConfig(
+    level=logging.DEBUG, 
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
+    filename='server.log', filemode='a'
+)
+
+from browser_use.browser.chrome import CHROME_ARGS
+
+CHROME_ARGS += [
+    "--start-maximized"
+]
 
 import fastapi
 import uvicorn
@@ -75,11 +87,6 @@ async def lifespan(app: fastapi.FastAPI):
             config=BrowserConfig(
                 headless=False,
                 disable_security=False,
-                extra_browser_args=[
-                    "--start-maximized",
-                    "--homepage=https://www.google.com",
-                    "--disable-blink-features=AutomationControlled"
-                ],
                 new_context_config=BrowserContextConfig(
                     allowed_domains=["*google.com*"],
                     cookies_file=None,
@@ -95,28 +102,35 @@ async def lifespan(app: fastapi.FastAPI):
         )
 
         ctx = await browser.new_context() 
-
+        
         _GLOBALS['browser'] = browser
         _GLOBALS['browser_context'] = ctx
 
         await _GLOBALS['browser_context'].__aenter__()
 
+        page = await ctx.get_current_page()
+        await page.goto(url='https://google.com', wait_until='commit')
+
         yield
 
     except Exception as err:
         logger.error(f"Exception raised {err}", stack_info=True)
+        import traceback
+        logger.error(traceback.format_exc())
 
     finally:
-        for process in processes:
-            try:
-                process.kill()
-            except: pass
 
         if _GLOBALS.get('browser_context'):
             try:
                 await _GLOBALS['browser_context'].__aexit__(None, None, None)
             except Exception as err:
                 logger.error(f"Exception raised while closing browser context: {err}", stack_info=True)
+
+        for process in processes:
+            try:
+                process.kill()
+            except Exception as err: 
+                logger.error(f"Failed to kill process {process}: {err}", stack_info=True)
 
 
 async def stream_reader(s: AsyncGenerator[Union[str, bytes], None]):

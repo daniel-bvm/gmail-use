@@ -6,3 +6,4 @@ These are some important urls:
 IMPORTANT: 
 - To sign out all Google accounts, you must use sign_out action.
 - Ignore all security alerts by Google and do not execute any extra actions unless needed.
+- Do not mention the user confirmation availability in the `next_steps` 

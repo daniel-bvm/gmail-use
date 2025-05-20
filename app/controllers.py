@@ -7,6 +7,14 @@ from .signals import (
 )
 from typing import Literal
 from fnmatch import fnmatch
+import logging
+from playwright._impl._api_structures import (
+    ClientCertificate,
+    Cookie
+)
+from typing import TypedDict
+
+logger = logging.getLogger(__name__)
 
 built_in_actions = [
     'done',
@@ -36,65 +44,66 @@ built_in_actions = [
     'update_range_contents' 
 ]
 
-_controller = Controller(
-    output_model=browser_use_custom_models.FinalAgentResult,
-    exclude_actions=[
-        a
-        for a in built_in_actions
-        if a not in [
-            'done',
-            # 'search_google',
-            'go_to_url',
-            'go_back',
-            'wait',
-            'click_element_by_index',
-            'input_text',
-            # 'save_pdf',
-            # 'switch_tab',
-            # 'open_tab',
-            # 'close_tab',
-            'extract_content',
-            'scroll_down',
-            'scroll_up',
-            'send_keys',
-            # 'scroll_to_text',
+exclude = [
+    a
+    for a in built_in_actions
+    if a not in [
+        'done',
+        # 'search_google',
+        'go_to_url',
+        'go_back',
+        # 'wait',
+        'click_element_by_index',
+        'input_text',
+        # 'save_pdf',
+        # 'switch_tab',
+        # 'open_tab',
+        # 'close_tab',
+        'extract_content',
+        'scroll_down',
+        'scroll_up',
+        'send_keys',
+        # 'scroll_to_text',
 
-            'get_dropdown_options',
-            'select_dropdown_option',
+        'get_dropdown_options',
+        'select_dropdown_option',
 
-            # 'drag_drop',
-            # 'get_sheet_contents',
-            # 'select_cell_or_range',
-            # 'get_range_contents',
-            # 'clear_selected_range',
-            # 'input_selected_cell_text',
-            'update_range_contents' 
-        ]
+        # 'drag_drop',
+        # 'get_sheet_contents',
+        # 'select_cell_or_range',
+        # 'get_range_contents',
+        # 'clear_selected_range',
+        # 'input_selected_cell_text',
+        'update_range_contents' 
     ]
+]
+
+_controller = Controller(
+    # output_model=browser_use_custom_models.FinalAgentResult,
+    exclude_actions=exclude
 )
 
-
 async def check_authorization(ctx: BrowserContext) -> bool:
-    site = 'accounts.google.com'
-    cookies = await ctx.session.context.cookies()
+    cookies = await ctx.session.context.cookies('https://mail.google.com')
 
     for cookie in cookies:
-        if not hasattr(cookie, 'domain') or not hasattr(cookie, 'name') or not hasattr(cookie, 'value'):
-            continue
+        
+        name = cookie.get('name', '')
+        value = cookie.get('value', '')
 
-        if cookie.domain == site and cookie.name == 'SID' and cookie.value:
+        if name == 'SID' and value != '':
             return True
 
     return False
 
-async def ensure_url(ctx: BrowserContext, pat: str) -> None:
+async def ensure_url(ctx: BrowserContext, url: str) -> None:
     page = await ctx.get_current_page()
     current_url = page.url
 
-    if not fnmatch(current_url, pat):
-        await page.goto(pat, wait_until='networkidle')
+    if not fnmatch(current_url, url + '*'):
+        logger.info(f'Navigating to {url} from {current_url}')
+        await page.goto(url, wait_until='networkidle')
 
-@_controller.action('Sign out Google account')
 async def sign_out(browser: BrowserContext):
     sites = ['accounts.google.com', 'mail.google.com']
 
@@ -106,7 +115,7 @@ async def sign_out(browser: BrowserContext):
 
     return ActionResult(extracted_content='Sign out successful!')
 
-@_controller.action('Open the user mail box')
+# @_controller.action('Open the user mail box')
 async def open_mail_box(browser: BrowserContext):
     page = await browser.get_current_page()
     
@@ -117,7 +126,6 @@ async def open_mail_box(browser: BrowserContext):
 
     return ActionResult(extracted_content='Navigated to input box')
 
-@_controller.action('Craft a new email')
 async def fill_email_form(browser: BrowserContext, subject: str, body: str, recipient: str):
     page = await browser.get_current_page()
 
@@ -127,7 +135,6 @@ async def fill_email_form(browser: BrowserContext, subject: str, body: str, reci
 
     return ActionResult(extracted_content='Email form filled successfully!')
 
-@_controller.action('Search email')
 async def search_email(browser: BrowserContext, query: str):
     page = await browser.get_current_page()
 
