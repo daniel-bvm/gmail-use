@@ -166,9 +166,9 @@ async def get_emails(
 
 async def prepare_email(
     ctx: BrowserContext, 
-    recipient: str, 
     subject: str, 
     body: str,
+    recipient: str = None, 
 ) -> AsyncGenerator[str, None]:
 
     if not await check_authorization(ctx):
@@ -180,15 +180,8 @@ async def prepare_email(
 
     compose_button = await page.query_selector('div[role="button"]:has-text("Compose")')
 
-    if not compose_button:
-        yield "Can not perform sending mail at this moment, please try again later."
-        return
-
-    new_email_close_button = await page.query_selector_all('img[aria-label="Save & close"]')
-
-    if len(new_email_close_button) > 0:
-        yield "I see you are writting to someone. Do you need my help?"
-        return
+    for img_tag in await page.query_selector_all('img[aria-label="Save & close"]'):
+        await img_tag.click()
 
     await compose_button.click()
     await page.wait_for_timeout(0.5)  # wait for the compose window to open
@@ -226,7 +219,7 @@ async def send_email(
         id_gen = IncrementID()
 
         task = 'Strictly follow the instructions below:\n'
-        task += f"{id_gen()}. Go to Drafts section by navigating to https://mail.google.com/mail/u/0/#drafts\n"
+        task += f"{id_gen()}. Go to Drafts section by navigating to 'https://mail.google.com/mail/u/0/#drafts'\n"
         task += f"{id_gen()}. if there's nothing here, task is completed\n"
         task += f"{id_gen()}. Select the first draft email in the screen \n"
         task += f"{id_gen()}. Click on the Send button to send the email\n"
@@ -234,11 +227,12 @@ async def send_email(
         async for msg in browse(task, ctx, max_steps=5):
             yield msg
 
-        return
-
-    await send_button.click()
-    await page.wait_for_timeout(1)
-    yield "Email sent!"
+    else:
+        for ehe in send_button:
+            await ehe.click() 
+        
+        await page.wait_for_timeout(1)
+        yield "Email sent!"
 
 async def sign_out(
     ctx: BrowserContext
@@ -262,11 +256,23 @@ async def execute_openai_compatible_toolcall(
         return
 
     if name == "send_email":
-        async for msg in prepare_email(ctx, **args):
+        async for msg in send_email(ctx, **args):
             yield msg
         
+
+    if name == "prepare_email":
+        recipient = args.get("recipient", "")
+        subject = args.get("subject", "")
+        body = args.get("body", "")
+
+        if not subject or not body:
+            yield "Recipient, subject, and body are required to prepare an email."
+            return
+
+        async for msg in prepare_email(ctx, recipient=recipient, subject=subject, body=body):
+            yield msg
+            
         raise RequireUserConfirmation("Email prepared! Please review the content, put your signature before sending.")
-        return
     
     if name == "sign_out":
         async for msg in sign_out(ctx):
@@ -332,8 +338,8 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
         {
             "type": "function",
             "function": {
-                "name": "send_email",
-                "description": "Send an email using Gmail.",
+                "name": "prepare_email",
+                "description": "Prepare an email.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -348,13 +354,23 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
                         "body": {
                             "type": "string",
                             "description": "The body content of the email."
-                        },
-                        "required_user_confirmation": {
-                            "type": ["string", "null"],
-                            "description": "let the user confirm and send it manually. Default to 'true'"
                         }
                     },
                     "required": ["recipient", "subject", "body"],
+                    "additionalProperties": False
+                },
+                "strict": False
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "send_email",
+                "description": "Send the prepared email.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
                     "additionalProperties": False
                 },
                 "strict": False
@@ -469,9 +485,9 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
                         )
 
                     except UnauthorizedAccess as e:
-                        result = f"Unauthorized access: {str(e)}\nNow, halt the current task and wait for the user to sign in manually. After then, Re-execute {_name} with these arguments: {_args}" 
+                        result = f"Unauthorized access: {str(e)}\nNow, temporarily stop the current task and wait for the user to sign in manually. After then, Re-execute {_name} with these arguments: {_args}" 
                         has_user_interaction_requested = True
-                    
+
                     except RequireUserConfirmation as e:
                         result = str(e)
                         has_user_interaction_requested = True                    

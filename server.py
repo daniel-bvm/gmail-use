@@ -61,7 +61,7 @@ async def lifespan(app: fastapi.FastAPI):
             d=DISPLAY
         ),
         'fluxbox',
-        'x11vnc -display {d} -nopw -forever -shared'.format(
+        'x11vnc -display {d} -nopw -forever -shared -rfbport 5900 -rfbversion 3.8 -noxdamage'.format(
             d=DISPLAY
         ),
         '/opt/novnc/utils/novnc_proxy --vnc localhost:5900 --listen {no_vnc_port}'.format(
@@ -190,7 +190,7 @@ def main():
     
     @api_app.get("/processing-url")
     async def get_processing_url():
-        http_display_url = os.getenv("HTTP_DISPLAY_URL", "http://localhost:6080/vnc.html?host=localhost&port=6080&autoconnect=true")
+        http_display_url = os.getenv("HTTP_DISPLAY_URL", "http://localhost:6080/?autoconnect=true")
 
         if http_display_url:
             return JSONResponse(

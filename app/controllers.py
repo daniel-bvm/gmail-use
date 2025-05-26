@@ -126,10 +126,12 @@ async def open_mail_box(browser: BrowserContext):
 
     return ActionResult(extracted_content='Navigated to input box')
 
-async def fill_email_form(browser: BrowserContext, subject: str, body: str, recipient: str):
+async def fill_email_form(browser: BrowserContext, subject: str, body: str, recipient: str = None):
     page = await browser.get_current_page()
 
-    await page.fill('input[aria-label="To recipients"]', recipient)
+    if recipient is not None:
+        await page.fill('input[aria-label="To recipients"]', recipient)
+
     await page.fill('input[name="subjectbox"]', subject)
     await page.fill('div[aria-label="Message Body"]', body)
 
