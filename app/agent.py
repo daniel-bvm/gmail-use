@@ -271,8 +271,8 @@ async def execute_openai_compatible_toolcall(
 
         async for msg in prepare_email(ctx, recipient=recipient, subject=subject, body=body):
             yield msg
-            
-        raise RequireUserConfirmation("Email prepared! Please review the content, put your signature before sending.")
+
+        raise RequireUserConfirmation("Email prepared! Please review the content, put your signature and send it manually. or, I can help you to send it, if you want!")
     
     if name == "sign_out":
         async for msg in sign_out(ctx):
