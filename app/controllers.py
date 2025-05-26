@@ -79,7 +79,7 @@ exclude = [
 ]
 
 _controller = Controller(
-    # output_model=browser_use_custom_models.FinalAgentResult,
+    output_model=browser_use_custom_models.BasicAgentResponse,
     exclude_actions=exclude
 )
 
@@ -146,6 +146,6 @@ async def search_email(browser: BrowserContext, query: str):
 
     return ActionResult(extracted_content='Search executed successfully!')
 
-def get_controler():
+def get_basic_controler():
     global _controller
     return _controller

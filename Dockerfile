@@ -1,4 +1,4 @@
-from python:3.12
+from python:3.12-slim
 
 env DEBIAN_FRONTEND=noninteractive
 env DISPLAY=:99
@@ -30,6 +30,7 @@ run apt-get update && apt-get install -y --no-install-recommends \
     libxcursor1 \
     libxi6 \
     libgl1-mesa-glx xvfb x11vnc fluxbox \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 run git clone https://github.com/novnc/noVNC.git /opt/novnc && \

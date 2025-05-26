@@ -7,6 +7,6 @@ class RunningStatus(str, Enum):
     ERROR = "error"
 
 # custom agent's final answer structure here
-class FinalAgentResult(BaseModel):
+class BasicAgentResponse(BaseModel):
     status: RunningStatus = RunningStatus.DONE 
     message: str

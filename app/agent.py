@@ -8,8 +8,16 @@ from .callbacks import (
 import json
 from browser_use import Agent
 from browser_use.browser.context import BrowserContext
-from .controllers import get_controler, exclude as excluded_tools, check_authorization, Controller, search_email, ensure_url, fill_email_form, sign_out as sign_out_controller
-from .models import oai_compatible_models, gmail_use_custom_models
+from .controllers import (
+    get_basic_controler, exclude as excluded_tools, 
+    check_authorization, Controller, 
+    search_email, ensure_url, 
+    fill_email_form, sign_out as sign_out_controller
+)
+from .models import (
+    oai_compatible_models,
+    browser_use_custom_models
+)
 from .utils import (
     get_system_prompt,
     refine_chat_history,
@@ -20,7 +28,7 @@ from .utils import (
 )
 import logging
 import openai
-from .signals import UnauthorizedAccess
+from .signals import UnauthorizedAccess, RequireUserConfirmation
 import openai
 from typing import Optional, List
 import httpx
@@ -30,7 +38,7 @@ import traceback
 logger = logging.getLogger()
 
 async def get_agent(task: str, ctx: BrowserContext, controller: Controller=None) -> Agent:
-    controller = controller or get_controler()
+    controller = controller or get_basic_controler()
 
     ellm = ChatOpenAI(
         model=os.getenv("LLM_MODEL_ID", 'local-llm'),
@@ -51,8 +59,6 @@ async def get_agent(task: str, ctx: BrowserContext, controller: Controller=None)
         task=task,
 
         llm=ellm,
-        planner_llm=ellm,
-        page_extraction_llm=ellm,
 
         browser_context=ctx,
         controller=controller,
@@ -62,11 +68,11 @@ async def get_agent(task: str, ctx: BrowserContext, controller: Controller=None)
         extend_planner_system_message=planner_extend_system_message,
 
         is_planner_reasoning=False,
-        use_vision=True,
-        use_vision_for_planner=True,
+        use_vision=False,
+        use_vision_for_planner=False,
 
         tool_calling_method='function_calling',
-        max_actions_per_step=2,
+        max_actions_per_step=1,
 
         # @TODO: fix this bug
         enable_memory=False, # bug here
@@ -79,8 +85,14 @@ async def get_agent(task: str, ctx: BrowserContext, controller: Controller=None)
         # )        
     )
 
-async def browse(task_query: str, ctx: BrowserContext, max_steps:int = 40, **_) -> AsyncGenerator[str, None]:
-    current_agent = await get_agent(task=task_query, ctx=ctx) 
+async def browse(
+    task_query: str, 
+    ctx: BrowserContext,
+    controller: Controller = None, 
+    max_steps:int = 40, 
+    **_
+) -> AsyncGenerator[str, None]:
+    current_agent = await get_agent(task=task_query, ctx=ctx, controller=controller)
 
     res = await current_agent.run(
         max_steps=max_steps,
@@ -90,8 +102,6 @@ async def browse(task_query: str, ctx: BrowserContext, max_steps:int = 40, **_) 
 
     final_result = res.final_result()
     yield final_result
-
-from fnmatch import fnmatch
 
 class IncrementID(object):
     def __init__(self, start: int = 1):
@@ -110,7 +120,6 @@ async def get_emails(
     include_words: Optional[str]="", 
     has_attachment: Optional[bool]=False,
 ) -> AsyncGenerator[str, None]:
-    gen_id = IncrementID()
 
     if not await check_authorization(ctx):
         await ensure_url(ctx, 'https://mail.google.com/')
@@ -143,24 +152,23 @@ async def get_emails(
 
         await search_email(ctx, query_str)
 
-    task = 'Follow strictly the instructions below:\n'
-    task += f"{gen_id()}. Extract data from the current page.\n"
-    task += f"{gen_id()}. Done, no more actions required!\n"
+    gen_id = IncrementID()
+    task = 'Strictly follow the instructions below:\n'
+    task += f"{gen_id()}. use extract_content to extract e-mail from the current page, response should include senders and subjects.\n"
     
     controller = Controller(
         exclude_actions=excluded_tools,
-        output_model=List[gmail_use_custom_models.SimpleEmailObject]
+        output_model=browser_use_custom_models.BasicAgentResponse,
     )
 
-    async for msg in browse(task, ctx):
+    async for msg in browse(task, ctx, controller=controller, max_steps=2):
         yield msg
 
-async def send_email(
+async def prepare_email(
     ctx: BrowserContext, 
     recipient: str, 
     subject: str, 
     body: str,
-    required_user_confirmation: Optional[bool]=True,
 ) -> AsyncGenerator[str, None]:
 
     if not await check_authorization(ctx):
@@ -175,28 +183,62 @@ async def send_email(
     if not compose_button:
         yield "Can not perform sending mail at this moment, please try again later."
         return
-    
-    for img_tag in await page.query_selector_all('img[aria-label="Save & close"]'):
-        if img_tag:
-            await img_tag.click()
-            await page.wait_for_timeout(0.2)
+
+    new_email_close_button = await page.query_selector_all('img[aria-label="Save & close"]')
+
+    if len(new_email_close_button) > 0:
+        yield "I see you are writting to someone. Do you need my help?"
+        return
 
     await compose_button.click()
     await page.wait_for_timeout(0.5)  # wait for the compose window to open
     await fill_email_form(ctx, subject=subject, body=body, recipient=recipient)
 
-    if required_user_confirmation:
-        yield "Please confirm and send the email manually."
-    else:
-        send_button = await page.query_selector('div[aria-label="Send ‪(Ctrl-Enter)‬"]')
+    yield "Email form prepared successfully! Please review the content before sending."
 
-        if not send_button:
-            yield "Can not find the send button, please try do it manually."
-            return 
+class EmailCacheMachine(object):
+    def __init__(self):
+        self._cache = {}
 
-        await send_button.click()
-        await page.wait_for_timeout(1)
-        yield "Email sent!"
+    def get(self, key: str) -> Optional[str]:
+        return self._cache.get(key)
+
+    def set(self, key: str, value: str) -> None:
+        self._cache[key] = value 
+
+async def send_email(
+    ctx: BrowserContext
+):
+    if not await check_authorization(ctx):
+        await ensure_url(ctx, 'https://mail.google.com')
+        raise UnauthorizedAccess("Please sign in to your Google account first.")
+
+    await ensure_url(ctx, 'https://mail.google.com')
+
+    page = await ctx.get_current_page()
+    send_button = await page.query_selector_all('div[aria-label="Send ‪(Ctrl-Enter)‬"]')
+
+    if len(send_button) != 1:
+
+        for img_tag in await page.query_selector_all('img[aria-label="Save & close"]'):
+            await img_tag.click()
+
+        id_gen = IncrementID()
+
+        task = 'Strictly follow the instructions below:\n'
+        task += f"{id_gen()}. Go to Drafts section by navigating to https://mail.google.com/mail/u/0/#drafts\n"
+        task += f"{id_gen()}. if there's nothing here, task is completed\n"
+        task += f"{id_gen()}. Select the first draft email in the screen \n"
+        task += f"{id_gen()}. Click on the Send button to send the email\n"
+
+        async for msg in browse(task, ctx, max_steps=5):
+            yield msg
+
+        return
+
+    await send_button.click()
+    await page.wait_for_timeout(1)
+    yield "Email sent!"
 
 async def sign_out(
     ctx: BrowserContext
@@ -205,7 +247,6 @@ async def sign_out(
     page = await ctx.get_current_page()
     page.reload(wait_until='networkidle')
     yield 'Sign out successful!'
-    
 
 async def execute_openai_compatible_toolcall(
     ctx: BrowserContext,
@@ -221,9 +262,10 @@ async def execute_openai_compatible_toolcall(
         return
 
     if name == "send_email":
-        async for msg in send_email(ctx, **args):
+        async for msg in prepare_email(ctx, **args):
             yield msg
-            
+        
+        raise RequireUserConfirmation("Email prepared! Please review the content, put your signature before sending.")
         return
     
     if name == "sign_out":
@@ -236,7 +278,7 @@ async def execute_openai_compatible_toolcall(
         task = args.get("task", "")
 
         if not task:
-            yield "No task provided for xbrowse tool call."
+            yield "No task provided to xbrowse tool call."
             return
 
         async for msg in browse(task, ctx):
@@ -369,7 +411,6 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
     calls = 0
     
     messages = await refine_chat_history(messages, get_system_prompt())
-    executed = set([])
 
     try:
         completion = await llm.chat.completions.create(
@@ -387,17 +428,20 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
 
         while completion.choices[0].message.tool_calls is not None and len(completion.choices[0].message.tool_calls) > 0:
             calls += len(completion.choices[0].message.tool_calls)
+            executed = set([])
 
             for call in completion.choices[0].message.tool_calls:
                 _id, _name = call.id, call.function.name    
                 _args = json.loads(call.function.arguments)
-                result, unauthorized = '', False
-                
-                if _name in executed:
+                result, has_user_interaction_requested = '', False
+                identity = _name + call.function.arguments
+
+                if identity in executed:
                     result = f"Tool call `{_name}` has been executed before with the same arguments: {_args}. Skipping"
-                    
+
                 else:
-                    executed.add(_name)
+                    executed.add(identity)
+
                     yield await to_chunk_data(
                         await wrap_chunk(
                             response_uuid,
@@ -413,30 +457,24 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
                             name=_name,
                             args=_args
                         ):
-                            yield await to_chunk_data(
-                                await wrap_chunk(
-                                    response_uuid,
-                                    msg,
-                                    role="tool"
-                                )
-                            )
-
                             if isinstance(msg, str):
                                 result += msg + '\n'
 
-                    except UnauthorizedAccess as e:
-                        logger.warning(f"{e}")
-
                         yield await to_chunk_data(
-                            await wrap_chunk(
+                           await wrap_chunk(
                                 response_uuid,
-                                f"Required log-in first. Pausing...\n",
-                                role="tool"
+                                f"<details>\n<summary>Tool call `{_name}` result</summary>\n\n{result}\n\n</details>\n",
+                                role="tool",
                             )
                         )
-    
+
+                    except UnauthorizedAccess as e:
                         result = f"Unauthorized access: {str(e)}\nNow, halt the current task and wait for the user to sign in manually. After then, Re-execute {_name} with these arguments: {_args}" 
-                        unauthorized = True
+                        has_user_interaction_requested = True
+                    
+                    except RequireUserConfirmation as e:
+                        result = str(e)
+                        has_user_interaction_requested = True                    
 
                 messages.append(
                     {
@@ -446,10 +484,10 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
                     }
                 )
 
-                if unauthorized:
+                if has_user_interaction_requested:
                     break
 
-            need_toolcalls = calls < 10 and not unauthorized
+            need_toolcalls = calls < 10 and not has_user_interaction_requested
 
             completion = await llm.chat.completions.create(
                 messages=messages,
