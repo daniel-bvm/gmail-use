@@ -1,0 +1,17 @@
+# ignore __pycache__ directories
+app/__pycache__/
+app/models/__pycache__/
+app/.DS_Store
+__pycache__/
+data
+browser-data
+Archive.zip
+
+# ignore Python bytecode files
+*/*.pyc
+# ignore Python egg files
+*.egg
+# ignore Python distribution files
+*.whl
+# ignore Python virtual environment directories
+venv/
