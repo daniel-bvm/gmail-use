@@ -1,0 +1,5 @@
+browser-use==0.2.4
+fastapi[standard]==0.115.12
+pydantic==2.10.6
+python-dotenv==1.1.0
+json-repair==0.46.0
