@@ -103,6 +103,8 @@ async def ensure_url(ctx: BrowserContext, url: str) -> None:
     if not fnmatch(current_url, url + '*'):
         logger.info(f'Navigating to {url} from {current_url}')
         await page.goto(url, wait_until='networkidle')
+        
+    return fnmatch(current_url, url + '*')
 
 async def sign_out(browser: BrowserContext):
     sites = ['accounts.google.com', 'mail.google.com']
@@ -150,4 +152,3 @@ async def search_email(browser: BrowserContext, query: str):
 
 def get_basic_controler():
     global _controller
-    return _controller
