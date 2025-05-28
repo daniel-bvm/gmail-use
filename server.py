@@ -1,16 +1,5 @@
 import logging
-
-# print to file
-logging.basicConfig(
-    level=logging.INFO, 
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', 
-)
-
-from browser_use.browser.chrome import CHROME_ARGS
-
-CHROME_ARGS += [
-    "--start-maximized"
-]
+logging.basicConfig(level=logging.INFO)
 
 import fastapi
 import uvicorn
@@ -31,8 +20,11 @@ from typing import AsyncGenerator
 import time
 import uuid
 import openai
-from browser_use import Browser, BrowserConfig
 from browser_use.browser.context import BrowserContextConfig
+from browser_use import BrowserSession, BrowserProfile, BrowserConfig
+
+
+BROWSER_PROFILE_DIR = "/storage/browser-profiles"
 
 logger = logging.getLogger(__name__)
 
@@ -45,28 +37,26 @@ _GLOBALS = {}
 async def lifespan(app: fastapi.FastAPI):
     processes: list[asyncio.subprocess.Process] = []
 
-    BROWSER_WINDOW_SIZE_WIDTH = int(os.getenv("BROWSER_WINDOW_SIZE_WIDTH", 1280)) 
-    BROWSER_WINDOW_SIZE_HEIGHT = int(os.getenv("BROWSER_WINDOW_SIZE_HEIGHT", 768)) 
+    BROWSER_WINDOW_SIZE_WIDTH = int(os.getenv("BROWSER_WINDOW_SIZE_WIDTH", 1440)) 
+    BROWSER_WINDOW_SIZE_HEIGHT = int(os.getenv("BROWSER_WINDOW_SIZE_HEIGHT", 1440)) 
     SCREEN_COLOR_DEPTH_BITS = int(os.getenv("SCREEN_COLOR_DEPTH_BITS", 24))
     DISPLAY = os.getenv("DISPLAY", ":99")
     NO_VNC_PORT = os.getenv("NO_VNC_PORT", 6080)
     CHROME_DEBUG_PORT = os.getenv("CHROME_DEBUG_PORT", 9222)
+
     os.environ['CDP_URL'] = f"http://localhost:{CHROME_DEBUG_PORT}"
+    os.makedirs('/tmp/.X11-unix', exist_ok=True)
+    os.makedirs('/tmp/.ICE-unix', exist_ok=True)    
+
+    os.makedirs(BROWSER_PROFILE_DIR, exist_ok=True)
+    logger.info(f"Created {BROWSER_PROFILE_DIR}: {os.path.exists(BROWSER_PROFILE_DIR)}")
 
     commands = [
-        'Xvfb {d} -screen 0 {w}x{h}x{b}'.format(
-            w=BROWSER_WINDOW_SIZE_WIDTH,
-            h=BROWSER_WINDOW_SIZE_HEIGHT,
-            b=SCREEN_COLOR_DEPTH_BITS,
-            d=DISPLAY
-        ),
-        'fluxbox',
-        'x11vnc -display {d} -nopw -forever -shared -rfbport 5900 -rfbversion 3.8 -noxdamage'.format(
-            d=DISPLAY
-        ),
-        '/opt/novnc/utils/novnc_proxy --vnc localhost:5900 --listen {no_vnc_port}'.format(
-            no_vnc_port=NO_VNC_PORT
-        )
+        f'Xvfb {DISPLAY} -screen 0 {BROWSER_WINDOW_SIZE_WIDTH}x{BROWSER_WINDOW_SIZE_HEIGHT}x{SCREEN_COLOR_DEPTH_BITS} -ac -nolisten tcp',
+        'openbox-session',
+        f"bash scripts/x11-setup.sh",
+        f'x11vnc -display {DISPLAY} -forever -shared -nopw -geometry {BROWSER_WINDOW_SIZE_WIDTH}x{BROWSER_WINDOW_SIZE_HEIGHT} -scale 1:1 -nomodtweak',
+        f'/opt/novnc/utils/novnc_proxy --vnc localhost:5900 --listen {NO_VNC_PORT}'
     ]
 
     try:
@@ -79,13 +69,14 @@ async def lifespan(app: fastapi.FastAPI):
                 shell=True,
                 executable="/bin/bash"
             )
-
             processes.append(p)
 
-        browser = Browser(
+        browser_profile = BrowserProfile(user_data_dir=BROWSER_PROFILE_DIR)
+
+        browser = BrowserSession(
+            browser_profile=browser_profile, 
             config=BrowserConfig(
                 headless=False,
-                disable_security=False,
                 new_context_config=BrowserContextConfig(
                     allowed_domains=["*google.com*"],
                     cookies_file=None,
@@ -101,15 +92,15 @@ async def lifespan(app: fastapi.FastAPI):
         )
 
         ctx = await browser.new_context() 
-        
+
         _GLOBALS['browser'] = browser
         _GLOBALS['browser_context'] = ctx
 
         await _GLOBALS['browser_context'].__aenter__()
-
-        page = await ctx.get_current_page()
-        await page.goto(url='https://google.com', wait_until='commit')
-
+        
+        current_page = await ctx.get_current_page()
+        await current_page.goto("https://google.com")
+        
         yield
 
     except Exception as err:
@@ -130,6 +121,14 @@ async def lifespan(app: fastapi.FastAPI):
                 process.kill()
             except Exception as err: 
                 logger.error(f"Failed to kill process {process}: {err}", stack_info=True)
+		
+		cleanup_cmd = "pkill -f chromium || true"
+        process = await asyncio.create_subprocess_shell(
+            cleanup_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        await process.communicate()
 
 
 async def stream_reader(s: AsyncGenerator[Union[str, bytes], None]):
@@ -173,7 +172,6 @@ async def stream_reader(s: AsyncGenerator[Union[str, bytes], None]):
 
     except Exception as err:
         error_message = "Unhandled error: " + str(err)
-
         import traceback
         logger.error(traceback.format_exc())
 
@@ -187,10 +185,10 @@ def main():
     api_app = fastapi.FastAPI(
         lifespan=lifespan
     )
-    
+
     @api_app.get("/processing-url")
     async def get_processing_url():
-        http_display_url = os.getenv("HTTP_DISPLAY_URL", "http://localhost:6080/?autoconnect=true")
+        http_display_url = os.getenv("HTTP_DISPLAY_URL", "http://localhost:6080/vnc.html?autoconnect=true&resize=scale")
 
         if http_display_url:
             return JSONResponse(
@@ -207,7 +205,7 @@ def main():
             },
             status_code=404
         )
-        
+
     @api_app.post("/prompt", response_model=None)
     async def post_prompt(body: dict) -> Union[StreamingResponse, PlainTextResponse, JSONResponse]:
         if body.get('ping'):
@@ -244,7 +242,6 @@ def main():
             )
         except Exception as err:
             error_message = "Unexpected Error: " + str(err)
-
             import traceback
             logger.error(traceback.format_exc())
 
@@ -263,7 +260,6 @@ def main():
         allow_headers=["*"],
     )
 
-    # pre-setup
     event_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(event_loop)
 
