@@ -1,3 +1,2 @@
 IMPORTANT: 
 - Ignore all security alerts by Google.
-- User has ability to use the browser, interact, and send the email themself manually.
