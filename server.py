@@ -23,8 +23,7 @@ import openai
 from browser_use.browser.context import BrowserContextConfig
 from browser_use import BrowserSession, BrowserProfile, BrowserConfig
 
-
-BROWSER_PROFILE_DIR = "/storage/browser-profiles"
+BROWSER_PROFILE_DIR = "/storages/browser-profiles"
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +57,26 @@ async def lifespan(app: fastapi.FastAPI):
         f'x11vnc -display {DISPLAY} -forever -shared -nopw -geometry {BROWSER_WINDOW_SIZE_WIDTH}x{BROWSER_WINDOW_SIZE_HEIGHT} -scale 1:1 -nomodtweak',
         f'/opt/novnc/utils/novnc_proxy --vnc localhost:5900 --listen {NO_VNC_PORT}'
     ]
+    
+    
+    for file in ["SingletonLock", "SingletonCookie", "SingletonSocket", "Local State", "Last Version"]:
+        path = os.path.join(BROWSER_PROFILE_DIR, file)
 
+        # check if the path is symlink
+        if os.path.islink(path):
+            # remove the original file
+            reference_path = os.readlink(path)
+            os.unlink(path)
+            
+            try:
+                os.remove(reference_path)
+            except FileNotFoundError:
+                logger.warning(f"Reference file {reference_path} not found, skipping removal.")
+
+        elif os.path.exists(path):
+            logger.info(f"Removing {path}")
+            os.remove(path)
+            
     try:
         for command in commands:
             logger.info(f"Executing {command}")
@@ -70,13 +88,12 @@ async def lifespan(app: fastapi.FastAPI):
                 executable="/bin/bash"
             )
             processes.append(p)
-
-        browser_profile = BrowserProfile(user_data_dir=BROWSER_PROFILE_DIR)
+            
 
         browser = BrowserSession(
-            browser_profile=browser_profile, 
             config=BrowserConfig(
                 headless=False,
+                user_data_dir=BROWSER_PROFILE_DIR,
                 new_context_config=BrowserContextConfig(
                     allowed_domains=["*google.com*"],
                     cookies_file=None,
@@ -121,8 +138,8 @@ async def lifespan(app: fastapi.FastAPI):
                 process.kill()
             except Exception as err: 
                 logger.error(f"Failed to kill process {process}: {err}", stack_info=True)
-		
-		cleanup_cmd = "pkill -f chromium || true"
+
+        cleanup_cmd = "pkill -f chromium || true"
         process = await asyncio.create_subprocess_shell(
             cleanup_cmd,
             stdout=asyncio.subprocess.PIPE,
@@ -185,6 +202,48 @@ def main():
     api_app = fastapi.FastAPI(
         lifespan=lifespan
     )
+    
+    @api_app.get("/debug/list-threads")
+    async def list_threads(
+        from_date: str = None,
+        to_date: str = None,
+        sender: str = None,
+        recipient: str = None,
+        include_words: str = None,
+        has_attachment: bool = False,
+        section: str = "inbox"
+    ):
+        from app.toolcalls import list_threads, enter_thread
+        
+        threads = await list_threads(
+            ctx=_GLOBALS.get("browser_context", None),
+            from_date=from_date,
+            to_date=to_date,
+            sender=sender,
+            recipient=recipient,
+            include_words=include_words,
+            has_attachment=has_attachment,
+            section=section
+        )
+
+        for thread in threads.result:
+            details = await enter_thread(
+                ctx=_GLOBALS.get("browser_context", None),
+                thread_id=thread.id
+            )
+            
+            print(details)
+
+        return JSONResponse(
+            content={
+                "threads": [
+                    e.model_dump() 
+                    for e in threads.result
+                ],
+                "status": "ready"
+            },
+            status_code=200
+        )
 
     @api_app.get("/processing-url")
     async def get_processing_url():

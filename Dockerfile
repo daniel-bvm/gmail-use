@@ -17,8 +17,8 @@ run git clone https://github.com/novnc/noVNC.git /opt/novnc && \
 
 copy requirements.txt requirements.base.txt .
 env PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-run --mount=type=cache,target=/root/.cache/pip pip install -r requirements.base.txt && patchright install chromium --no-shell --with-deps
-run --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
+run pip install -r requirements.base.txt && patchright install chromium --no-shell --with-deps
+run pip install -r requirements.txt
 
 workdir /workspace
 

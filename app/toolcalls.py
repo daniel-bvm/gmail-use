@@ -38,7 +38,7 @@ class ResponseMessage(BaseModel, Generic[_generic_type]):
 
         return self
 
-class SimpleMailThread(TypedDict):
+class SimpleMailThread(BaseModel):
     id: str
     subject: str
     sender: str
@@ -98,23 +98,36 @@ async def get_current_threads(
     silent: bool = False
 ) -> ResponseMessage[list[SimpleMailThread]]:
     page = await ctx.get_current_page()
+    response_model = ResponseMessage[list[SimpleMailThread]]
 
     if not page.url.startswith('https://mail.google.com') and silent:
-        return ResponseMessage(result=[])
+        return response_model(result=[])
 
     await ensure_authorized(ctx)
 
-    threads = await page.query_selector_all("tr.zA")  # or div.zA depending on Gmail variant
+    await page.wait_for_load_state(state='domcontentloaded')  # Wait for the threads to load
+    await page.wait_for_selector('div[role="main"] tbody tr.zA')  # Ensure the main content is loaded
+
+    threads = []
+    
+    retries = 5
+
+    while threads == [] and retries > 0:
+        await page.wait_for_timeout(1000)  # Wait for a second to allow threads to load
+        threads = await page.query_selector_all('div[role="main"] tbody tr.zA')  # or div.zA depending on Gmail variant
+        retries -= 1
+
     results = []
 
     for i, thread in enumerate(threads):
         thread: ElementHandle  # or div.zA depending on Gmail variant
+        
         subject = await thread.eval_on_selector(".bog", "el => el.innerText")
-        sender = await thread.eval_on_selector(".yX.xY .yP", "el => el.innerText")
+        sender = await thread.eval_on_selector(".yX.xY", "el => el.innerText")
         snippet = await thread.eval_on_selector(".y2", "el => el.innerText")
         timestamp = await thread.eval_on_selector(".xW.xY span", "el => el.getAttribute('title')")
         has_attachment = await thread.query_selector('[title="Has attachment"]') is not None  # Check for attachment icon
-        span_btn = await thread.query_selector('span[@data-thread-id]')  # The span with the date/time 
+        span_btn = await thread.query_selector('span[data-thread-id]')  # The span with the date/time 
 
         if span_btn is None:
             continue
@@ -122,7 +135,8 @@ async def get_current_threads(
         _id = await span_btn.get_attribute('data-thread-id') or ''  # Get the thread ID from the span element 
         _id = _id.split(':')[-1]
 
-        if not _id or not cache_element(f'mail-thread-{_id}', thread):  # Cache the element for later use
+        thread_outter_html = (await thread.get_property('outerHTML')).__str__()
+        if not _id or not cache_element(f'mail-thread-{_id}', thread_outter_html):  # Cache the element for later use
             logger.warning(f"Failed to cache thread element with ID: {_id}")
 
         # TODO: check this and get infrmation about attachments and labels
@@ -135,7 +149,7 @@ async def get_current_threads(
             has_attachment=has_attachment,  # Placeholder, as attachment info is not available in the thread list
         ))
 
-    return ResponseMessage[list[SimpleMailThread]](result=results)
+    return response_model(result=results)
 
 async def ensure_authorized(ctx: BrowserContext) -> bool:
     if not await check_authorization(ctx):
@@ -144,20 +158,6 @@ async def ensure_authorized(ctx: BrowserContext) -> bool:
 
     await ensure_url(ctx, 'https://mail.google.com/')
     page = await ctx.get_current_page()
-
-    # get all url from href of page
-    hrefs = await page.query_selector_all('a[href]')
-
-    for href in hrefs:
-        url = await href.get_attribute('href')
-
-        if url and url.startswith('https://'):
-            params = parse_qs(urlparse(url).query)
-
-            if 'ik' in params and params['ik']:
-                cache_element('ik', params['ik'][0])
-                break
-
     return True
 
 async def craft_query(
@@ -169,7 +169,7 @@ async def craft_query(
     has_attachment: Optional[bool]=False,
     section: Literal["inbox", "sent", "drafts", "spam", "trash", "starred"] = "inbox"
 ):
-    query_str = f'{include_words}'
+    query_str = f'{include_words}' if include_words else ''
 
     if from_date:
         query_str += f' after:{from_date}'
@@ -210,6 +210,8 @@ async def list_threads(
     has_attachment: Optional[bool]=False,
     section: Literal["inbox", "sent", "drafts", "spam", "trash"] = "inbox"
 ) -> ResponseMessage[list[SimpleMailThread]]:
+    await ensure_authorized(ctx)
+
     query = await craft_query(
         from_date=from_date, 
         to_date=to_date,
@@ -223,22 +225,40 @@ async def list_threads(
     if query:
         await search_email(ctx, query)
 
+    print(f"Searching for emails with query: {query}")
     return await get_current_threads(ctx, silent=False)
 
-@lru_cache(maxsize=256)
-async def read_mail_thread(ctx: BrowserContext, id: str) -> Optional[MailThread]:
-    ik = query_cached_element('ik')
+_cached_mail_detail = { # id --> MailThread
+    
+}
+
+async def extract_mail_thread_detail(ctx: BrowserContext, id: str) -> Optional[MailThread]:
+    global _cached_mail_detail
+
+    if id in _cached_mail_detail:
+        return _cached_mail_detail[id]
+    
+    page = await ctx.get_current_page()
+    ik = await page.evaluate(
+        """() => {
+            const gmIdKey = Object.keys(window).find(key => key.startsWith('GM_ID_KEY'));
+            return window[gmIdKey] || '';
+        }"""
+    )
+    
+    cookies_list = await ctx.browser_context.cookies(
+        urls=['https://mail.google.com']
+    )
+    
+    cookies = {cookie['name']: cookie['value'] for cookie in cookies_list}
+
     params = {
         'ik': ik,
         'view': 'om',
         'permmsgid': f'msg-f:{id}'
     }
-    url = f'https://mail.google.com/mail/u/0/'
 
-    cookies = await ctx.browser_context.cookies(
-        url='https://mail.google.com' 
-        # Ensure the cookies are fetched from the correct domain
-    )
+    url = f'https://mail.google.com/mail/u/0/'
 
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
@@ -262,28 +282,39 @@ async def read_mail_thread(ctx: BrowserContext, id: str) -> Optional[MailThread]
     msg = BytesParser(policy=policy.default).parsebytes(raw.encode())
     body = msg.get_body(preferencelist=('plain')).get_content() if msg.get_body(preferencelist=('plain')) else ""
 
-    return MailThread(
+    detail = MailThread(
         id=id,
         subject=msg['subject'] or "No Subject",
         sender=msg['from'] or "Unknown Sender",
         date=str(msg['date'] or "Unknown Date"),
         body=body
     )
+
+    _cached_mail_detail[id] = detail
+    return detail
     
 async def ensure_thread_opened(ctx: BrowserContext, thread_id: str) -> bool:
-    xpath = f'div[@data-message-id="#msg-f:{thread_id}"]'
+    xpath = f'div[data-message-id="#msg-f:{thread_id}"]'
 
     page = await ctx.get_current_page()
     element = await page.query_selector(xpath)
 
-    if not element:
-        target_row = await page.query_selector(f'span[data-thread-id="#thread-f:{thread_id}"]')
+    if element is not None:
+        return True
 
-    if target_row:
-        await target_row.click()
+    page = await ctx.get_current_page()
+    target_row = await page.query_selector(f'//tr[.//span[@data-thread-id="#thread-f:{thread_id}"]]')
+
+    if target_row is not None:
+        await target_row.eval_on_selector(
+            'div[role="link"]',
+            """(el) => {
+                el.click();
+            }"""
+        )
 
     else:
-        element: ElementHandle = await query_cached_element(f'mail-thread-{thread_id}')
+        element: str = query_cached_element(f'mail-thread-{thread_id}')
 
         if not element:
             return ResponseMessage[bool](error="E-mail not found", success=False)
@@ -291,16 +322,13 @@ async def ensure_thread_opened(ctx: BrowserContext, thread_id: str) -> bool:
         tbody = await page.query_selector('tbody')
 
         if not tbody:
-            await page.goto('https://mail.google.com', wait_until='networkidle')
+            await page.goto('https://mail.google.com', wait_until='domcontentloaded')
 
         tbody = await page.query_selector('tbody')
 
         if not tbody:
             logger.error("Failed to find tbody element in the page.")
             return ResponseMessage[bool](error="Page broken", success=False)
-
-        # hide the element if it is already visible and append to the tbody
-        # TODO: potential bug here: solution: cache the html text only, not the elemnt handle
 
         await page.evaluate(
              """(tbody, element) => {
@@ -341,8 +369,9 @@ async def enter_thread(ctx: BrowserContext, thread_id: str) -> ResponseMessage[M
 
     page = await ctx.get_current_page() 
     await ensure_thread_opened(ctx, thread_id)
-    await page.wait_for_selector('div[role="main"]', timeout=5000)
-    mail_thread = await read_mail_thread(thread_id)
+    await page.wait_for_selector('div[role="main"]', timeout=5000)    
+
+    mail_thread = await extract_mail_thread_detail(ctx, thread_id)
 
     direct_url = 'https://mail.google.com/mail/u/0/#inbox/' + page.url.split('/')[-1]
     cache_element(f'direct-url-{thread_id}', direct_url)

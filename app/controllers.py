@@ -84,7 +84,7 @@ _controller = Controller(
 )
 
 async def check_authorization(ctx: BrowserContext) -> bool:
-    cookies = await ctx.session.context.cookies('https://mail.google.com')
+    cookies = await ctx.browser_context.cookies('https://mail.google.com')
 
     for cookie in cookies:
         
@@ -102,8 +102,8 @@ async def ensure_url(ctx: BrowserContext, url: str) -> None:
 
     if not fnmatch(current_url, url + '*'):
         logger.info(f'Navigating to {url} from {current_url}')
-        await page.goto(url, wait_until='networkidle')
-        
+        await page.goto(url, wait_until='domcontentloaded')
+
     return fnmatch(current_url, url + '*')
 
 async def sign_out(browser: BrowserContext):
@@ -113,7 +113,7 @@ async def sign_out(browser: BrowserContext):
         await browser.session.context.clear_cookies(domain=site)
         
     page = await browser.get_current_page()
-    await page.reload(wait_until='networkidle')
+    await page.reload(wait_until='load')
 
     return ActionResult(extracted_content='Sign out successful!')
 
@@ -121,10 +121,8 @@ async def sign_out(browser: BrowserContext):
 async def open_mail_box(browser: BrowserContext):
     page = await browser.get_current_page()
     
-    await page.goto(
-        'https://mail.google.com/mail/u/0/', 
-        wait_until='networkidle' # networkidle
-    )
+    await page.goto('https://mail.google.com/mail/u/0/', wait_until='domcontentloaded')
+    await page.wait_for_selector('div[role="main"]', timeout=5000)
 
     return ActionResult(extracted_content='Navigated to input box')
 
@@ -146,7 +144,6 @@ async def search_email(browser: BrowserContext, query: str):
     await page.wait_for_selector('input[name="q"]', timeout=5000)
     await page.fill('input[name="q"]', query)
     await page.click('button[aria-label="Search mail"]')
-    await page.wait_for_timeout(2000)
 
     return ActionResult(extracted_content='Search executed successfully!')
 
