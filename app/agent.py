@@ -78,16 +78,20 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
                         args=_args
                     )
 
-                    yield to_chunk_data(
-                        wrap_toolcall_response(
-                            uuid=response_uuid,
-                            fn_name=_name,
-                            args=_args,
-                            result=res.result
+                    if res.success:
+                        yield to_chunk_data(
+                            wrap_toolcall_response(
+                                uuid=response_uuid,
+                                fn_name=_name,
+                                args=_args,
+                                result=res.result
+                            )
                         )
-                    )
 
-                    result = json.dumps(refine_mcp_response(res.result))
+                        result = json.dumps(refine_mcp_response(res.result))
+
+                    else:
+                        result = f"Tool call failed: {res.error}"
 
                 except UnauthorizedAccess as e:
                     result = f"Waiting for the user to sign in manually." 

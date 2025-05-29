@@ -519,19 +519,14 @@ async def forward_thread(
     region = regions[0]  # Use the first compose region
     await region.focus()  # Focus on the compose region
 
-    recipient_input = await region.query_selector('input[aria-label="To recipients"]')  # The input field for the recipient
-    if not recipient_input:
-        return response_model(error="Recipient input field not found.", success=False)
-    
-    await recipient_input.fill(recipient)  # Fill the recipient input field
+    compose_id = await region.get_attribute('data-compose-id')  # Get the compose ID
+
+    await page.fill(f'div[role="region"][data-compose-id="{compose_id}"] input[aria-label="To recipients"]', recipient)  # Fill the recipient input field
     await asyncio.sleep(1)  # Wait for a second to ensure the input is filled
 
     send_button = await region.query_selector('div.T-I.J-J5-Ji.aoO.T-I-atl[role="button"]')  # The send button
-
-    if not send_button:
-        return response_model(error="Send button not found.", success=False)
-
     await send_button.click()  # Click the send button
+    
     await asyncio.sleep(2)  # Wait for the email to be sent
     return response_model(result="Email forwarded successfully.")
 
@@ -578,20 +573,15 @@ async def reply_to_thread(
     region = regions[0]  # Use the first compose region
     await region.focus()  # Focus on the compose region
 
-    message_input = await page.query_selector('div[aria-label="Message Body"]')  # The input field for the message body
-    if not message_input:
-        return response_model(error="Message input field not found.", success=False)
-    
+    message_input = await region.query_selector('div[aria-label="Message Body"]')  # The input field for the message body
     await message_input.fill(message)
-    send_button = await page.query_selector('div.T-I.J-J5-Ji.aoO.T-I-atl[role="button"]')  # The send button
+    await asyncio.sleep(2)  # Wait for a second to ensure the input is filled
 
-    if not send_button:
-        return response_model(error="Send button not found.", success=False)
-
+    send_button = await region.query_selector('div.T-I.J-J5-Ji.aoO.T-I-atl[role="button"]')  # The send button
     await send_button.click()  # Click the send button
-    await asyncio.sleep(2)  # Wait for the email to be sent
 
-    return response_model(result="Email forwarded successfully.")
+    await asyncio.sleep(2)  # Wait for the email to be sent
+    return response_model(result="Replied.")
 
 # 5
 async def compose_email(
@@ -628,24 +618,29 @@ async def compose_email(
     region = regions[0]  # Use the first compose region
     await region.focus()  # Focus on the compose region
 
+    recipient_element = await region.query_selector('input[aria-label="To recipients"]')  # The input field for the recipient
+
+    # fill the recipient input field
+    if not recipient_element:
+        return response_model(
+            error="Failed to find the recipient input field. User should fill this value and send it manually", 
+            success=False
+        )
+        
+    await recipient_element.fill(recipient)
+
     subjectbox_element = await region.query_selector('input[name="subjectbox"]')  # The input field for the subject
     await subjectbox_element.fill(subject)
     await asyncio.sleep(0.5)  # Wait for a second to ensure the input is filled
 
-    message_body_element = await page.query_selector('div[aria-label="Message Body"]')  # The input field for the message body
+    message_body_element = await region.query_selector('div[aria-label="Message Body"]')  # The input field for the message body
     await message_body_element.fill(body)
     await asyncio.sleep(0.5)  # Wait for a second to ensure the body is filled
 
-    await region.fill('input[aria-label="To recipients"]', recipient)
+    compose_id = await region.get_attribute('data-compose-id')
     await asyncio.sleep(0.5)  # Wait for a second to ensure the recipient is filled
 
-    send_button = await page.query_selector('div.T-I.J-J5-Ji.aoO.T-I-atl[role="button"]')  # The send button
-
-    if not send_button:
-        return response_model(error="Send button not found.", success=False)
-
-    compose_id = await region.get_attribute('data-compose-id')
-
+    send_button = await region.query_selector('div.T-I.J-J5-Ji.aoO.T-I-atl[role="button"]')  # The send button
     await send_button.click()  # Click the send button
     await asyncio.sleep(2)  # Wait for the email to be sent
 
@@ -845,20 +840,26 @@ async def execute_toolcall(
     elif tool_name == "enter_thread":
         return await enter_thread(ctx, **args)
 
-    elif tool_name == "forward_thread":
-        return await forward_thread(ctx, **args)
-
-    elif tool_name == "reply_to_thread":
-        return await reply_to_thread(ctx, **args)
-
-    elif tool_name == "compose_email":
-        return await compose_email(ctx, **args)
-
     elif tool_name == "sign_out":
         return await sign_out(ctx)
 
     else:
-        return response_model(error=f"Unknown tool call: {tool_name}", success=False)
+        try:
+            if tool_name == "forward_thread":
+                return await forward_thread(ctx, **args)
+
+            elif tool_name == "reply_to_thread":
+                return await reply_to_thread(ctx, **args)
+
+            elif tool_name == "compose_email":
+                return await compose_email(ctx, **args)
+        except Exception as e:
+            if isinstance(e, UnauthorizedAccess):
+                raise e
+
+            return response_model(error=f"Action {tool_name} failed, the user should do it manually.", success=False) 
+
+    return response_model(error=f"Unknown tool call: {tool_name}", success=False)
     
 async def get_current_user_identity(
     ctx: BrowserContext
