@@ -46,7 +46,7 @@ def repair_json_no_except(json_str: str) -> str:
 
 
 
-async def preserve_upload_file(file_data_uri: str, file_name: str) -> str:
+def preserve_upload_file(file_data_uri: str, file_name: str) -> str:
     os.makedirs(os.path.join(os.getcwd(), 'uploads'), exist_ok=True)
 
     file_data_base64 = file_data_uri.split(',')[-1]
@@ -64,17 +64,23 @@ async def preserve_upload_file(file_data_uri: str, file_name: str) -> str:
         logger.error(f"Failed to preserve upload file: {e}")
         return None
 
+import re
+def strip_toolcall_noti(content: str) -> str:
+    cleaned = re.sub(r"<details\b[^>]*>.*?</details>", "", content, flags=re.DOTALL | re.IGNORECASE)
+    return cleaned.strip()
+ 
 
-async def refine_chat_history(messages: list[dict[str, str]], system_prompt: str) -> list[dict[str, str]]:
+def refine_chat_history(messages: list[dict[str, str]], system_prompt: str) -> list[dict[str, str]]:
     refined_messages = []
-
     has_system_prompt = False
+
     for message in messages:
         message: dict[str, str]
 
         if isinstance(message, dict) and message.get('role', 'undefined') == 'system':
             message['content'] += f'\n{system_prompt}'
             has_system_prompt = True
+            refined_messages.append(message)
             continue
     
         if isinstance(message, dict) \
@@ -92,7 +98,7 @@ async def refine_chat_history(messages: list[dict[str, str]], system_prompt: str
                 elif item.get('type', 'undefined') == 'file':
                     file_item = item.get('file', {})
                     if 'file_data' in file_item and 'filename' in file_item:
-                        file_path = await preserve_upload_file(
+                        file_path = preserve_upload_file(
                             file_item.get('file_data', ''),
                             file_item.get('filename', '')
                         )
@@ -112,7 +118,12 @@ async def refine_chat_history(messages: list[dict[str, str]], system_prompt: str
             })
 
         else:
-            refined_messages.append(message)
+            _message = {
+                "role": message.get('role', 'user'),
+                "content": strip_toolcall_noti(message.get('content', ''))
+            }
+
+            refined_messages.append(_message)
 
     if not has_system_prompt and system_prompt != "":
         refined_messages.insert(0, {
@@ -131,22 +142,22 @@ async def refine_chat_history(messages: list[dict[str, str]], system_prompt: str
 
     return refined_messages
 
-async def to_chunk_data(chunk: ChatCompletionStreamResponse) -> bytes:
+def to_chunk_data(chunk: ChatCompletionStreamResponse) -> bytes:
     return ("data: " + json.dumps(chunk.model_dump()) + "\n\n").encode()
 
-async def done_token() -> bytes:
+def done_token() -> bytes:
     return "data: [DONE]\n\n".encode()
 
-async def refine_mcp_response(something: Any) -> str:
+def refine_mcp_response(something: Any) -> str:
     if isinstance(something, dict):
         return {
-            k: await refine_mcp_response(v)
+            k: refine_mcp_response(v)
             for k, v in something.items()
         }
 
     elif isinstance(something, (list, tuple)):
         return [
-            await refine_mcp_response(v)
+            refine_mcp_response(v)
             for v in something
         ]
 
@@ -155,7 +166,7 @@ async def refine_mcp_response(something: Any) -> str:
 
     return something
 
-async def wrap_chunk(uuid: str, raw: str, role="assistant") -> ChatCompletionStreamResponse:
+def wrap_chunk(uuid: str, raw: str, role="assistant") -> ChatCompletionStreamResponse:
     return ChatCompletionStreamResponse(
         id=uuid,
         object='chat.completion.chunk',
@@ -172,7 +183,7 @@ async def wrap_chunk(uuid: str, raw: str, role="assistant") -> ChatCompletionStr
         ]
     )
     
-async def refine_assistant_message(
+def refine_assistant_message(
     assistant_message: dict[str, str]
 ) -> dict[str, str]:
 
@@ -183,3 +194,84 @@ async def refine_assistant_message(
     
 def random_uuid() -> str:
     return str(uuid.uuid4())
+
+def wrap_toolcall_request(uuid: str, fn_name: str, args: dict[str, Any]) -> ChatCompletionStreamResponse:
+    args_str = json.dumps(args, indent=2)
+
+    template = f'''
+Executing <b>{fn_name}</b>
+
+<details>
+<summary>
+Arguments:
+</summary>
+
+```json
+{args_str}
+```
+
+</details>
+'''
+
+    return ChatCompletionStreamResponse(
+        id=uuid,
+        object='chat.completion.chunk',
+        created=int(time.time()),
+        model='unspecified',
+        choices=[
+            dict(
+                index=0,
+                delta=dict(
+                    content=template,
+                    role='tool'
+                ),
+            )
+        ]
+    )
+    
+
+def wrap_toolcall_response(
+    uuid: str,
+    fn_name: str,
+    args: dict[str, Any],
+    result: dict[str, Any]
+) -> ChatCompletionStreamResponse:
+
+    data = refine_mcp_response(result)
+
+    try:
+        data = json.dumps(data, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.warning(f"Failed to JOSN serialize tool call response: {e}")
+        data = str(data)
+
+
+    result = f'''
+<details>
+<summary>
+Response:
+</summary>
+
+{data}
+
+</details>
+<br>
+
+'''
+
+    return ChatCompletionStreamResponse(
+        id=uuid,
+        object='chat.completion.chunk',
+        created=int(time.time()),
+        model='unspecified',
+        choices=[
+            dict(
+                index=0,
+                delta=dict(
+                    content=result,
+                    role='tool'
+                ),
+            )
+        ]
+    )
+    

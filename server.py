@@ -23,7 +23,7 @@ import openai
 from browser_use.browser.context import BrowserContextConfig
 from browser_use import BrowserSession, BrowserProfile, BrowserConfig
 
-BROWSER_PROFILE_DIR = "/storages/browser-profiles"
+BROWSER_PROFILE_DIR = "/storage/browser-profiles"
 
 logger = logging.getLogger(__name__)
 
@@ -202,48 +202,6 @@ def main():
     api_app = fastapi.FastAPI(
         lifespan=lifespan
     )
-    
-    @api_app.get("/debug/list-threads")
-    async def list_threads(
-        from_date: str = None,
-        to_date: str = None,
-        sender: str = None,
-        recipient: str = None,
-        include_words: str = None,
-        has_attachment: bool = False,
-        section: str = "inbox"
-    ):
-        from app.toolcalls import list_threads, enter_thread
-        
-        threads = await list_threads(
-            ctx=_GLOBALS.get("browser_context", None),
-            from_date=from_date,
-            to_date=to_date,
-            sender=sender,
-            recipient=recipient,
-            include_words=include_words,
-            has_attachment=has_attachment,
-            section=section
-        )
-
-        for thread in threads.result:
-            details = await enter_thread(
-                ctx=_GLOBALS.get("browser_context", None),
-                thread_id=thread.id
-            )
-            
-            print(details)
-
-        return JSONResponse(
-            content={
-                "threads": [
-                    e.model_dump() 
-                    for e in threads.result
-                ],
-                "status": "ready"
-            },
-            status_code=200
-        )
 
     @api_app.get("/processing-url")
     async def get_processing_url():

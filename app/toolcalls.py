@@ -18,10 +18,10 @@ import os
 import logging
 import httpx
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse, parse_qs
-import email
 from email import policy
 from email.parser import BytesParser
+from email.utils import parsedate_to_datetime
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -38,22 +38,30 @@ class ResponseMessage(BaseModel, Generic[_generic_type]):
 
         return self
 
-class SimpleMailThread(BaseModel):
+class SimpleEMail(BaseModel):
     id: str
     subject: str
     sender: str
     date: str
     snippet: str
     has_attachment: bool
-    
-class MailThread(BaseModel):
+
+    timestamp: int = 0
+
+class EMail(BaseModel):
     id: str
     subject: str
     sender: str
     date: str
     body: str
+
+    timestamp: int = 0
+
+class EMailThread(BaseModel):
+    id: str
+    mails: list[EMail]
     
-cache_dir = os.path.join('/storages', 'cache')
+cache_dir = os.path.join('/storage', 'cache')
 os.makedirs(cache_dir, exist_ok=True)
 
 @lru_cache(maxsize=256)
@@ -91,25 +99,40 @@ def cache_element(key: str, element: Any) -> bool:
 
     return True
 
+def has_cached_element(key: str) -> bool:
+    """
+    Check if an element is cached by its ID.
+    This is a placeholder function as caching in Playwright is not straightforward.
+    """
+    
+    obj_path = os.path.join(cache_dir, key)
+    return os.path.exists(obj_path)
+
 
 # 0: get all mails that are currently shown in the screen
 async def get_current_threads(
     ctx: BrowserContext,
-    silent: bool = False
-) -> ResponseMessage[list[SimpleMailThread]]:
+    silent: bool = False,
+    limit: int = 30
+) -> ResponseMessage[list[SimpleEMail]]:
     page = await ctx.get_current_page()
-    response_model = ResponseMessage[list[SimpleMailThread]]
+    response_model = ResponseMessage[list[SimpleEMail]]
 
     if not page.url.startswith('https://mail.google.com') and silent:
         return response_model(result=[])
 
     await ensure_authorized(ctx)
-
     await page.wait_for_load_state(state='domcontentloaded')  # Wait for the threads to load
-    await page.wait_for_selector('div[role="main"] tbody tr.zA')  # Ensure the main content is loaded
+    
+    try:
+        await page.wait_for_selector('div[role="main"]', timeout=5000)  # Wait for the main content to load
+        await page.wait_for_selector('div[role="main"] tbody', timeout=5000)  # Wait for the main content to load
+        await page.wait_for_selector('div[role="main"] tbody tr.zA', timeout=5000)  # Ensure the main content is loaded
+    except Exception as e:
+        logger.warning(f"No message found: {e} (this is normal if the inbox is empty)")
+        return response_model(result=[])
 
     threads = []
-    
     retries = 5
 
     while threads == [] and retries > 0:
@@ -126,6 +149,8 @@ async def get_current_threads(
         sender = await thread.eval_on_selector(".yX.xY", "el => el.innerText")
         snippet = await thread.eval_on_selector(".y2", "el => el.innerText")
         timestamp = await thread.eval_on_selector(".xW.xY span", "el => el.getAttribute('title')")
+
+        # TODO: "Has attachment" may not be available in all Gmail variants 
         has_attachment = await thread.query_selector('[title="Has attachment"]') is not None  # Check for attachment icon
         span_btn = await thread.query_selector('span[data-thread-id]')  # The span with the date/time 
 
@@ -133,14 +158,14 @@ async def get_current_threads(
             continue
 
         _id = await span_btn.get_attribute('data-thread-id') or ''  # Get the thread ID from the span element 
-        _id = _id.split(':')[-1]
+        _id = _id.strip('#')
 
         thread_outter_html = (await thread.get_property('outerHTML')).__str__()
-        if not _id or not cache_element(f'mail-thread-{_id}', thread_outter_html):  # Cache the element for later use
+        if not _id or not cache_element(f'mail-thread-element-{_id}', thread_outter_html):  # Cache the element for later use
             logger.warning(f"Failed to cache thread element with ID: {_id}")
 
         # TODO: check this and get infrmation about attachments and labels
-        results.append(SimpleMailThread(
+        results.append(SimpleEMail(
             id=_id,  # Placeholder for thread ID, as Gmail's UI does not expose it directly
             subject=subject or "No Subject",
             sender=sender or "Unknown Sender",
@@ -148,6 +173,10 @@ async def get_current_threads(
             snippet=snippet or "",
             has_attachment=has_attachment,  # Placeholder, as attachment info is not available in the thread list
         ))
+        
+        if len(results) >= limit:
+            logger.info(f"Reached the limit of {limit} threads, stopping.")
+            break
 
     return response_model(result=results)
 
@@ -157,7 +186,6 @@ async def ensure_authorized(ctx: BrowserContext) -> bool:
         raise UnauthorizedAccess('You are not authorized to access this resource. Please log in to your Google account.')
 
     await ensure_url(ctx, 'https://mail.google.com/')
-    page = await ctx.get_current_page()
     return True
 
 async def craft_query(
@@ -167,7 +195,7 @@ async def craft_query(
     recipient: Optional[str]=None,
     include_words: Optional[str]="", 
     has_attachment: Optional[bool]=False,
-    section: Literal["inbox", "sent", "drafts", "spam", "trash", "starred"] = "inbox"
+    section: Literal["inbox", "sent", "spam", "trash", "starred"] = "inbox"
 ):
     query_str = f'{include_words}' if include_words else ''
 
@@ -208,8 +236,9 @@ async def list_threads(
     recipient: Optional[str]=None,
     include_words: Optional[str]="", 
     has_attachment: Optional[bool]=False,
-    section: Literal["inbox", "sent", "drafts", "spam", "trash"] = "inbox"
-) -> ResponseMessage[list[SimpleMailThread]]:
+    section: Literal["inbox", "sent", "spam", "trash"] = "inbox",
+    limit: int = 30
+) -> ResponseMessage[list[SimpleEMail]]:
     await ensure_authorized(ctx)
 
     query = await craft_query(
@@ -222,22 +251,19 @@ async def list_threads(
         section=section
     )
 
+    page = await ctx.get_current_page()
+    dest = f'https://mail.google.com/mail/u/0/#{section}/'
+    await page.goto(dest, wait_until='domcontentloaded')
+
     if query:
         await search_email(ctx, query)
 
-    print(f"Searching for emails with query: {query}")
-    return await get_current_threads(ctx, silent=False)
+    return await get_current_threads(ctx, silent=False, limit=limit)
 
-_cached_mail_detail = { # id --> MailThread
-    
-}
+async def extract_mail_message_detail(ctx: BrowserContext, id: str) -> Optional[EMail]:
+    if has_cached_element(f'mail-message-{id}'):
+        return query_cached_element(f'mail-message-{id}')
 
-async def extract_mail_thread_detail(ctx: BrowserContext, id: str) -> Optional[MailThread]:
-    global _cached_mail_detail
-
-    if id in _cached_mail_detail:
-        return _cached_mail_detail[id]
-    
     page = await ctx.get_current_page()
     ik = await page.evaluate(
         """() => {
@@ -255,7 +281,7 @@ async def extract_mail_thread_detail(ctx: BrowserContext, id: str) -> Optional[M
     params = {
         'ik': ik,
         'view': 'om',
-        'permmsgid': f'msg-f:{id}'
+        'permmsgid': id
     }
 
     url = f'https://mail.google.com/mail/u/0/'
@@ -277,33 +303,42 @@ async def extract_mail_thread_detail(ctx: BrowserContext, id: str) -> Optional[M
         return None
 
     soup = BeautifulSoup(response.text, features="html.parser")
-    raw = soup.find('pre', {'id': 'raw_message_text'}).text
+    pre = soup.find('pre', {'id': 'raw_message_text'})
+
+    if not pre:
+        logger.error(f"Failed to find raw message text for thread {id}.")
+        return None
+    
+    raw = pre.text
 
     msg = BytesParser(policy=policy.default).parsebytes(raw.encode())
     body = msg.get_body(preferencelist=('plain')).get_content() if msg.get_body(preferencelist=('plain')) else ""
+    datetime_obj = parsedate_to_datetime(msg['date']) if msg['date'] else None
+    timestamp = int(datetime_obj.timestamp()) if datetime_obj else 0
 
-    detail = MailThread(
+    detail = EMail(
         id=id,
         subject=msg['subject'] or "No Subject",
         sender=msg['from'] or "Unknown Sender",
         date=str(msg['date'] or "Unknown Date"),
-        body=body
+        body=body,
+        timestamp=timestamp
     )
 
-    _cached_mail_detail[id] = detail
+    if not cache_element(f'mail-message-{id}', detail):
+        logger.warning(f"Failed to cache mail message with ID: {id}")
+
     return detail
     
 async def ensure_thread_opened(ctx: BrowserContext, thread_id: str) -> bool:
-    xpath = f'div[data-message-id="#msg-f:{thread_id}"]'
-
     page = await ctx.get_current_page()
-    element = await page.query_selector(xpath)
+    element = await page.query_selector(f'h2[data-thread-perm-id="{thread_id}"]')
 
     if element is not None:
         return True
 
     page = await ctx.get_current_page()
-    target_row = await page.query_selector(f'//tr[.//span[@data-thread-id="#thread-f:{thread_id}"]]')
+    target_row = await page.query_selector(f'//tr[.//span[@data-thread-id="#{thread_id}"]]')
 
     if target_row is not None:
         await target_row.eval_on_selector(
@@ -314,7 +349,7 @@ async def ensure_thread_opened(ctx: BrowserContext, thread_id: str) -> bool:
         )
 
     else:
-        element: str = query_cached_element(f'mail-thread-{thread_id}')
+        element: str = query_cached_element(f'mail-thread-element-{thread_id}')
 
         if not element:
             return ResponseMessage[bool](error="E-mail not found", success=False)
@@ -342,45 +377,102 @@ async def ensure_thread_opened(ctx: BrowserContext, thread_id: str) -> bool:
                     console.error('Failed to append:', e);
                 }
             }""",
-            tbody,
-            element
+            [tbody, element]
         )
 
         # refresh the element after appending
-        element = await page.query_selector(f'span[data-thread-id="#thread-f:{thread_id}"]')  # or div.zA depending on Gmail variant
+        element = await page.query_selector(f'span[data-thread-id="#{thread_id}"]')  # or div.zA depending on Gmail variant
 
         if not element:
             logger.error(f"Element with ID {thread_id} not found after appending.")
-            return response_model(error="E-mail not found", success=False)
+            return False
 
         await element.click()
-        return False
     
+    await page.wait_for_selector(f'h2[data-thread-perm-id="{thread_id}"]')
+
+    # TODO: expand all mails in the thread to get the data-message-id
+    # for element in await page.query_selector_all(f'div[id=":1"] div[role="list"] div[role="listitem"] span[id]'):
+    #     await element.click()
+
     return True
 
-
 # 2
-async def enter_thread(ctx: BrowserContext, thread_id: str) -> ResponseMessage[MailThread]:
+async def enter_thread(ctx: BrowserContext, thread_id: str) -> ResponseMessage[EMailThread]:
     await ensure_authorized(ctx)
-    response_model = ResponseMessage[MailThread]
+    response_model = ResponseMessage[EMailThread]
 
     if not thread_id:
         return response_model(error="Thread ID cannot be empty or n/a.", success=False)
 
+
     page = await ctx.get_current_page() 
     await ensure_thread_opened(ctx, thread_id)
-    await page.wait_for_selector('div[role="main"]', timeout=5000)    
 
-    mail_thread = await extract_mail_thread_detail(ctx, thread_id)
+    if has_cached_element(f'mail-thread-{thread_id}'):
+        return response_model(result=query_cached_element(f'mail-thread-{thread_id}'))
+
+    mail_list = []
+
+    # find all divs with data-message-id=*
+    mail_elements = await page.query_selector_all(f'div[data-message-id]')
+
+    for element in mail_elements:
+        data_message_id = await element.get_attribute('data-message-id')
+        print(f"Processing mail element with data-message-id: {data_message_id}")
+
+        if not data_message_id:
+            continue
+
+        data_message_id = data_message_id.strip('#')
+        email = await extract_mail_message_detail(ctx, data_message_id)
+
+        if email:
+            mail_list.append(email)
 
     direct_url = 'https://mail.google.com/mail/u/0/#inbox/' + page.url.split('/')[-1]
     cache_element(f'direct-url-{thread_id}', direct_url)
 
-    if not mail_thread:
-        return response_model(error="Failed to read the mail thread.", success=False)
+    mail_thread = EMailThread(
+        id=thread_id,
+        mails=mail_list
+    )
+    cache_element(f'mail-thread-{thread_id}', mail_thread)
 
     return response_model(result=mail_thread)
 
+async def compose_regions(ctx: BrowserContext) -> list[ElementHandle]:
+    page = await ctx.get_current_page()
+    regions = await page.query_selector_all('div[role="region"][data-compose-id]') 
+    return regions
+
+async def send_key_combo(element: ElementHandle, keys: list[str]) -> bool:
+    """
+    Send a key combination to the specified element.
+    """
+    
+    if not element:
+        logger.error("Element is None, cannot send key combination.")
+        return False
+
+    await element.focus()
+    
+    for key in keys:
+        await element.keyboard.down(key)
+
+    await asyncio.sleep(0.1)  # Small delay to ensure the keys are registered
+
+    for key in reversed(keys):
+        await element.keyboard.up(key)
+
+async def discard_drafts(ctx: BrowserContext) -> bool:
+    await ensure_authorized(ctx)
+    regions = await compose_regions(ctx)
+
+    for region in regions:
+        logger.info(f"Discarding draft in region: {region}")
+        await send_key_combo(region, ['Control', 'Shift', 'd'])  # Ctrl + Shift + D to discard draft
+    
 # 3
 async def forward_thread(
     ctx: BrowserContext,
@@ -393,11 +485,61 @@ async def forward_thread(
     if not thread_id:
         return response_model(error="Thread ID cannot be empty or n/a.", success=False)
 
+    if not await ensure_thread_opened(ctx, thread_id):
+        return response_model(error="Thread not found or not opened.", success=False)
+    
+    page = await ctx.get_current_page()
+
+    # find span with text "Forward" inside
+    forward_btn = await page.query_selector('//span[normalize-space()="Forward" and @role="link"]')  # The forward button in the thread
+    if not forward_btn:
+        return response_model(error="Failed to find the forward button in the thread.", success=False) 
+
+    await forward_btn.click()  # Click the forward button
+    await page.wait_for_timeout(1000)  # Wait for the forward dialog to open
+
+    regions = await compose_regions(ctx)  # Get all compose regions 
+
+    if not regions:
+        return response_model(error="No compose regions found.", success=False)
+
+    regions_w_id = [
+        (await region.get_attribute('data-compose-id') or -1, region) 
+        for region in regions
+    ]  
+    regions_w_id.sort(key=lambda x: int(x[0]), reverse=True)  # Sort by data-compose-id in reverse order
+    regions = [region for _, region in regions_w_id]  # Extract the regions from the sorted list
+
+    if not regions:
+        return response_model(error="No compose regions found.", success=False)
+
+    if len(regions) > 1:
+        logger.warning(f"Multiple compose regions found: {len(regions)}. Using the last one.")
+
+    region = regions[0]  # Use the first compose region
+    await region.focus()  # Focus on the compose region
+
+    recipient_input = await region.query_selector('input[aria-label="To recipients"]')  # The input field for the recipient
+    if not recipient_input:
+        return response_model(error="Recipient input field not found.", success=False)
+    
+    await recipient_input.fill(recipient)  # Fill the recipient input field
+    await asyncio.sleep(1)  # Wait for a second to ensure the input is filled
+
+    send_button = await region.query_selector('div.T-I.J-J5-Ji.aoO.T-I-atl[role="button"]')  # The send button
+
+    if not send_button:
+        return response_model(error="Send button not found.", success=False)
+
+    await send_button.click()  # Click the send button
+    await asyncio.sleep(2)  # Wait for the email to be sent
+    return response_model(result="Email forwarded successfully.")
+
 # 4
 async def reply_to_thread(
     ctx: BrowserContext, 
     thread_id, 
-    message: Optional[str] = None
+    message: str
 ) -> ResponseMessage[str]:
     await ensure_authorized(ctx)
     response_model = ResponseMessage[str]
@@ -405,15 +547,109 @@ async def reply_to_thread(
     if not thread_id:
         return response_model(error="Thread ID cannot be empty or n/a.", success=False)
 
+    if not await ensure_thread_opened(ctx, thread_id):
+        return response_model(error="Thread not found or not opened.", success=False)
+    
+    page = await ctx.get_current_page()
+
+    # find span with text "Forward" inside
+    forward_btn = await page.query_selector('//span[normalize-space()="Reply" and @role="link"]')  # The forward button in the thread
+    if not forward_btn:
+        return response_model(error="Failed to find the forward button in the thread.", success=False) 
+
+    await forward_btn.click()  # Click the forward button
+    await page.wait_for_timeout(1000)  # Wait for the forward dialog to open
+    
+    regions = await compose_regions(ctx)  # Get all compose regions 
+
+    regions_w_id = [
+        (await region.get_attribute('data-compose-id') or -1, region) 
+        for region in regions
+    ]
+    regions_w_id.sort(key=lambda x: int(x[0]), reverse=True)  # Sort by data-compose-id in reverse order
+    regions = [region for _, region in regions_w_id]  # Extract the regions from the sorted list
+    
+    if not regions:
+        return response_model(error="No compose regions found.", success=False)
+    
+    if len(regions) > 1: 
+        logger.warning(f"Multiple compose regions found: {len(regions)}. Using the first one.")
+
+    region = regions[0]  # Use the first compose region
+    await region.focus()  # Focus on the compose region
+
+    message_input = await page.query_selector('div[aria-label="Message Body"]')  # The input field for the message body
+    if not message_input:
+        return response_model(error="Message input field not found.", success=False)
+    
+    await message_input.fill(message)
+    send_button = await page.query_selector('div.T-I.J-J5-Ji.aoO.T-I-atl[role="button"]')  # The send button
+
+    if not send_button:
+        return response_model(error="Send button not found.", success=False)
+
+    await send_button.click()  # Click the send button
+    await asyncio.sleep(2)  # Wait for the email to be sent
+
+    return response_model(result="Email forwarded successfully.")
+
 # 5
-async def compose_email(ctx: BrowserContext, to, subject, body):
-    pass
+async def compose_email(
+    ctx: BrowserContext, 
+    recipient: str, 
+    subject: str, 
+    body: str,
+) -> ResponseMessage[str]:
+    response_model = ResponseMessage[str]
 
-# # 6
-# async def label_thread(ctx: BrowserContext, thread_id, label: Literal['important', 'starred', 'unread']):
-#     pass
+    await ensure_authorized(ctx)
 
-# 7 
+    page = await ctx.get_current_page()    
+    compose_button = await page.query_selector('div[role="button"]:has-text("Compose")')
+    await compose_button.click()
+    await page.wait_for_timeout(0.5) 
+    
+    regions = await compose_regions(ctx)  # Get all compose regions
+    
+    regions_w_id = [
+        (await region.get_attribute('data-compose-id') or -1, region) 
+        for region in regions
+    ]
+
+    regions_w_id.sort(key=lambda x: int(x[0]), reverse=True)  # Sort by data-compose-id in reverse order
+    regions = [region for _, region in regions_w_id]  # Extract the regions from the sorted list
+
+    if not regions:
+        return response_model(error="No compose regions found.", success=False)
+
+    if len(regions) > 1:
+        logger.warning(f"Multiple compose regions found: {len(regions)}. Using the first one.")
+
+    region = regions[0]  # Use the first compose region
+    await region.focus()  # Focus on the compose region
+
+    await region.fill('input[name="subjectbox"]', subject)
+    await asyncio.sleep(0.5)  # Wait for a second to ensure the input is filled
+
+    await region.fill('div[aria-label="Message Body"]', body)
+    await asyncio.sleep(0.5)  # Wait for a second to ensure the body is filled
+
+    await region.fill('input[aria-label="To recipients"]', recipient)
+    await asyncio.sleep(0.5)  # Wait for a second to ensure the recipient is filled
+
+    send_button = await page.query_selector('div.T-I.J-J5-Ji.aoO.T-I-atl[role="button"]')  # The send button
+
+    if not send_button:
+        return response_model(error="Send button not found.", success=False)
+
+    compose_id = await region.get_attribute('data-compose-id')
+
+    await send_button.click()  # Click the send button
+    await asyncio.sleep(2)  # Wait for the email to be sent
+
+    return response_model(result=f"Email sent (Compose ID: {compose_id})", success=True)
+
+# 6
 async def sign_out(ctx: BrowserContext) -> ResponseMessage[bool]:
     response_model = ResponseMessage[bool]
 
@@ -427,12 +663,218 @@ async def sign_out(ctx: BrowserContext) -> ResponseMessage[bool]:
         file_path = os.path.join(cache_dir, file)
 
         if os.path.isfile(file_path):
-            os.remove(file_path)
+            os.unlink(file_path)
 
     query_cached_element.cache_clear()
-    read_mail_thread.cache_clear()
-
-    if 'accounts.google.com' in page.url:
-        raise UnauthorizedAccess("Unauthorized access: Google sign-in page detected.")
-
     return response_model(result=True)
+
+async def get_context_aware_available_toolcalls(ctx: BrowserContext):
+    toolcalls = [
+        {
+            "type": "function",
+            "function": {
+                "name": "list_threads",
+                "description": "Get email threads from Gmail with the specified criteria.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "from_date": {
+                            "type": ["string", "null"],
+                            "description": "The starting date to filter emails by, in format (yyyy/mm/dd)."
+                        },
+                        "to_date": {
+                            "type": ["string", "null"],
+                            "description": "The ending date to filter emails by, in format (yyyy/mm/dd). If not provided, it defaults to the current date."
+                        },
+                        "sender": {
+                            "type": ["string", "null"],
+                            "description": "Filter emails by sender's email address."
+                        },
+                        "recipient": {
+                            "type": ["string", "null"],
+                            "description": "Filter emails by recipient's email address."
+                        },
+                        "include_words": {
+                            "type": ["string", "null"],
+                            "description": "Include words to filter emails."
+                        },
+                        "has_attachment": {
+                            "type": ["boolean", "null"],
+                            "description": "Whether to filter emails that have attachments."
+                        },
+                        "section": {
+                            "type": "string",
+                            "enum": ["inbox", "sent", "spam", "trash"],
+                            "default": "inbox",
+                            "description": "The section of Gmail to filter emails from."
+                        },
+                        "limit": {
+                            "type": "number",
+                            "default": 30,
+                            "description": "The maximum number of email threads to return."
+                        }
+                    },
+                    "required": [],
+                    "additionalProperties": False
+                },
+                "strict": False
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "enter_thread",
+                "description": "Enter a specific email thread by its ID and get full context of the thread.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "thread_id": {
+                            "type": "string",
+                            "description": "The ID of the email thread to enter."
+                        }
+                    },
+                    "required": ["thread_id"],
+                    "additionalProperties": False
+                },
+                "strict": False
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "forward_thread",
+                "description": "Forward an email thread (identify by its ID) to a specified recipient.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "thread_id": {
+                            "type": "string",
+                            "description": "The ID of the email thread to forward."
+                        },
+                        "recipient": {
+                            "type": ["string", "null"],
+                            "description": "The recipient's email address to forward the thread to."
+                        }
+                    },
+                    "required": ["thread_id", "recipient"],
+                    "additionalProperties": False
+                },
+                "strict": False
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": 'reply_to_thread',
+                'description': 'Reply to an email (identify by its ID) thread with a message.',
+                'parameters': {
+                    'type': 'object',
+                    'properties': {
+                        'thread_id': {
+                            'type': 'string',
+                            'description': 'The ID of the email thread to reply to.'
+                        },
+                        'message': {
+                            'type': ['string', 'null'],
+                            'description': 'The message to reply with.'
+                        }
+                    },
+                    'required': ['thread_id', 'message'],
+                    'additionalProperties': False
+                },
+                'strict': False
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "compose_email",
+                "description": "Compose a new email and send it.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "recipient": {
+                            "type": ["string", "null"],
+                            "description": "The recipient's email address."
+                        },
+                        "subject": {
+                            "type": ["string", "null"],
+                            "description": "The subject of the email."
+                        },
+                        "body": {
+                            "type": ["string", "null"],
+                            "description": "The body of the email."
+                        }
+                    },
+                    "required": ["recipient", "subject", "body"],
+                    "additionalProperties": False
+                },
+                "strict": False
+            }
+        },
+        {
+            'type': 'function',
+            'function': {
+                'name': 'sign_out',
+                'description': 'Sign out from the current Gmail session.',
+                'parameters': {},
+                'strict': False
+            }
+        }
+    ]
+
+    is_authorized = await check_authorization(ctx)
+
+    if is_authorized:
+        return toolcalls
+
+    return toolcalls[:-1]  # Exclude sign_out if the user is authorized
+
+async def execute_toolcall(
+    ctx: BrowserContext, 
+    tool_name: str, 
+    args: dict[str, Any]
+) -> ResponseMessage[Any]:
+    response_model = ResponseMessage[Any]
+
+    if tool_name == "list_threads":
+        return await list_threads(ctx, **args)
+
+    elif tool_name == "enter_thread":
+        return await enter_thread(ctx, **args)
+
+    elif tool_name == "forward_thread":
+        return await forward_thread(ctx, **args)
+
+    elif tool_name == "reply_to_thread":
+        return await reply_to_thread(ctx, **args)
+
+    elif tool_name == "compose_email":
+        return await compose_email(ctx, **args)
+
+    elif tool_name == "sign_out":
+        return await sign_out(ctx)
+
+    else:
+        return response_model(error=f"Unknown tool call: {tool_name}", success=False)
+    
+async def get_current_user_identity(
+    ctx: BrowserContext
+) -> ResponseMessage[dict[str, str]]:
+    response_model = ResponseMessage[dict[str, str]]
+
+    if not await check_authorization(ctx):
+        return response_model(error="User is not authorized.", success=False)
+
+    page = await ctx.get_current_page()
+    user_info = await page.evaluate(
+        """() => {
+            const user = window.gapi.auth2.getAuthInstance().currentUser.get();
+            return {
+                email: user.getBasicProfile().getEmail(),
+                name: user.getBasicProfile().getName()
+            };
+        }"""
+    )
+
+    return response_model(result=user_info, success=True)
