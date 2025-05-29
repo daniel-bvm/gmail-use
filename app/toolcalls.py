@@ -39,7 +39,7 @@ class ResponseMessage(BaseModel, Generic[_generic_type]):
         return self
 
 class SimpleEMail(BaseModel):
-    id: str
+    thread_id: str
     subject: str
     sender: str
     date: str
@@ -49,7 +49,7 @@ class SimpleEMail(BaseModel):
     timestamp: int = 0
 
 class EMail(BaseModel):
-    id: str
+    message_id: str
     subject: str
     sender: str
     date: str
@@ -58,7 +58,7 @@ class EMail(BaseModel):
     timestamp: int = 0
 
 class EMailThread(BaseModel):
-    id: str
+    thread_id: str
     mails: list[EMail]
     
 cache_dir = os.path.join('/storage', 'cache')
@@ -166,7 +166,7 @@ async def get_current_threads(
 
         # TODO: check this and get infrmation about attachments and labels
         results.append(SimpleEMail(
-            id=_id,  # Placeholder for thread ID, as Gmail's UI does not expose it directly
+            thread_id=_id,  # Placeholder for thread ID, as Gmail's UI does not expose it directly
             subject=subject or "No Subject",
             sender=sender or "Unknown Sender",
             date=timestamp or "Unknown Date",
@@ -317,7 +317,7 @@ async def extract_mail_message_detail(ctx: BrowserContext, id: str) -> Optional[
     timestamp = int(datetime_obj.timestamp()) if datetime_obj else 0
 
     detail = EMail(
-        id=id,
+        message_id=id,
         subject=msg['subject'] or "No Subject",
         sender=msg['from'] or "Unknown Sender",
         date=str(msg['date'] or "Unknown Date"),
@@ -434,7 +434,7 @@ async def enter_thread(ctx: BrowserContext, thread_id: str) -> ResponseMessage[E
     cache_element(f'direct-url-{thread_id}', direct_url)
 
     mail_thread = EMailThread(
-        id=thread_id,
+        thread_id=thread_id,
         mails=mail_list
     )
     cache_element(f'mail-thread-{thread_id}', mail_thread)
@@ -628,10 +628,12 @@ async def compose_email(
     region = regions[0]  # Use the first compose region
     await region.focus()  # Focus on the compose region
 
-    await region.fill('input[name="subjectbox"]', subject)
+    subjectbox_element = await region.query_selector('input[name="subjectbox"]')  # The input field for the subject
+    await subjectbox_element.fill(subject)
     await asyncio.sleep(0.5)  # Wait for a second to ensure the input is filled
 
-    await region.fill('div[aria-label="Message Body"]', body)
+    message_body_element = await page.query_selector('div[aria-label="Message Body"]')  # The input field for the message body
+    await message_body_element.fill(body)
     await asyncio.sleep(0.5)  # Wait for a second to ensure the body is filled
 
     await region.fill('input[aria-label="To recipients"]', recipient)
