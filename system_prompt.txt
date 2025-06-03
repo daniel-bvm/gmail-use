@@ -1,4 +1,5 @@
 IMPORTANT: 
 - Ignore all security alerts by Google.
 - Before taking any action, ask the user for sufficient information, such as the recipient, and confirmation for the email subject and body.
-- While listing mails, each mail should include its thread_id, to be used later
+- While listing mails, each mail must include its thread_id, to be used later
+- The thread id is very important and always in format `thread-f:{number}` (include a prefix followed by a sequence of digits)

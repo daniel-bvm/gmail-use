@@ -95,7 +95,7 @@ async def lifespan(app: fastapi.FastAPI):
                 headless=False,
                 user_data_dir=BROWSER_PROFILE_DIR,
                 new_context_config=BrowserContextConfig(
-                    allowed_domains=["*google.com*"],
+                    allowed_domains=["mail.google.com", "google.com", "eternalai.org"],
                     cookies_file=None,
                     maximum_wait_page_load_time=5,
                     disable_security=False,
@@ -116,7 +116,7 @@ async def lifespan(app: fastapi.FastAPI):
         await _GLOBALS['browser_context'].__aenter__()
         
         current_page = await ctx.get_current_page()
-        await current_page.goto("https://google.com")
+        await current_page.goto("https://mail.google.com")
         
         yield
 
@@ -201,7 +201,7 @@ async def stream_reader(s: AsyncGenerator[Union[str, bytes], None]):
 def main():
     api_app = fastapi.FastAPI(
         lifespan=lifespan
-    )
+    )   
 
     @api_app.get("/processing-url")
     async def get_processing_url():

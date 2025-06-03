@@ -23,7 +23,8 @@ import httpx
 import traceback
 from .toolcalls import (
     get_context_aware_available_toolcalls,
-    execute_toolcall
+    execute_toolcall,
+    get_current_user_identity
 )
 
 logger = logging.getLogger()
@@ -39,8 +40,18 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
     error_details = ''
     error_message = ''
     calls = 0
+    
+    system_prompt = get_system_prompt()
+    system_prompt.strip(" \n")
 
-    messages = refine_chat_history(messages, get_system_prompt())
+    try:
+        user_identity_req = await get_current_user_identity(browser_context)
+        if user_identity_req.success:
+            system_prompt += "\n- User identity to use as mail signature: " + user_identity_req.result
+    except Exception as e:
+        pass
+
+    messages = refine_chat_history(messages, system_prompt)
     toolcalls = await get_context_aware_available_toolcalls(browser_context)
 
     try:
@@ -59,6 +70,7 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
         while completion.choices[0].message.tool_calls is not None and len(completion.choices[0].message.tool_calls) > 0:
             calls += len(completion.choices[0].message.tool_calls)
             has_user_interaction_requested = False
+
             for call in completion.choices[0].message.tool_calls:
                 _id, _name = call.id, call.function.name    
                 _args = json.loads(call.function.arguments)
@@ -77,6 +89,8 @@ async def prompt(messages: list[dict[str, str]], browser_context: BrowserContext
                         tool_name=_name,
                         args=_args
                     )
+                    
+                    logger.info(f"Tool call result: {res}")
 
                     if res.success:
                         yield to_chunk_data(

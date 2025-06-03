@@ -22,6 +22,7 @@ from email import policy
 from email.parser import BytesParser
 from email.utils import parsedate_to_datetime
 import asyncio
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,8 @@ def has_cached_element(key: str) -> bool:
 async def get_current_threads(
     ctx: BrowserContext,
     silent: bool = False,
-    limit: int = 30
+    limit: int = 30,
+    visibility: bool = False
 ) -> ResponseMessage[list[SimpleEMail]]:
     page = await ctx.get_current_page()
     response_model = ResponseMessage[list[SimpleEMail]]
@@ -144,7 +146,13 @@ async def get_current_threads(
 
     for i, thread in enumerate(threads):
         thread: ElementHandle  # or div.zA depending on Gmail variant
-        
+
+        if visibility:
+            is_visible = await thread.is_visible()
+            if not is_visible:
+                logger.debug(f"Thread {i} is not visible, skipping.")
+                continue
+
         subject = await thread.eval_on_selector(".bog", "el => el.innerText")
         sender = await thread.eval_on_selector(".yX.xY", "el => el.innerText")
         snippet = await thread.eval_on_selector(".y2", "el => el.innerText")
@@ -381,13 +389,18 @@ async def ensure_thread_opened(ctx: BrowserContext, thread_id: str) -> bool:
         )
 
         # refresh the element after appending
-        element = await page.query_selector(f'span[data-thread-id="#{thread_id}"]')  # or div.zA depending on Gmail variant
+        element_handle = await page.query_selector(f'//tr[.//span[@data-thread-id="#{thread_id}"]]')  # or div.zA depending on Gmail variant
 
-        if not element:
+        if not element_handle:
             logger.error(f"Element with ID {thread_id} not found after appending.")
             return False
 
-        await element.click()
+        await element_handle.eval_on_selector(
+            'div[role="link"]',
+            """(el) => {
+                el.click();
+            }"""
+        )
     
     await page.wait_for_selector(f'h2[data-thread-perm-id="{thread_id}"]')
 
@@ -665,6 +678,114 @@ async def sign_out(ctx: BrowserContext) -> ResponseMessage[bool]:
     query_cached_element.cache_clear()
     return response_model(result=True)
 
+async def move_thread_to(
+    ctx: BrowserContext,
+    label: Literal["spam", "trash"]
+):
+    page = await ctx.get_current_page()
+
+    if label == "spam":
+        res = await page.evaluate(
+            """() => {
+                const spamButton = document.querySelector('div[aria-label="Report spam"]');
+                if (spamButton) {
+                    spamButton.click();
+                    return true;
+                } else {
+                    console.error('Spam button not found.');
+                }
+                
+                return false;
+            }"""
+        )  # Click the spam button using JavaScript to ensure it works even if the button is not visible
+
+    elif label == "trash":
+        res = await page.evaluate(
+            """() => {
+                const trashButton = document.querySelector('div[aria-label="Delete"]');
+                if (trashButton) {
+                    trashButton.click();
+                    return true;
+                } else {
+                    console.error('Trash button not found.');
+                }
+                
+                return false;
+            }"""
+        )
+
+    else:
+        raise ValueError(f"Invalid label: {label}. Must be 'spam' or 'trash'.")
+
+    await page.wait_for_timeout(1000)  # Wait for a second to ensure the label is applied
+    return res
+
+# 7
+async def label_threads(
+    ctx: BrowserContext,
+    thread_ids: str, # separated by comma
+    label: Literal["spam", "trash"]
+) -> ResponseMessage[str]:
+    response_model = ResponseMessage[str]
+
+    thread_ids = set([
+        thread_id.strip() 
+        for thread_id in thread_ids.split(',') 
+        if thread_id.strip()
+    ])
+
+    not_found_ids = []
+    error_ids = []
+    moved = []
+
+    for i, thread_id in enumerate(thread_ids):
+        if not thread_id:
+            continue
+
+        if not await ensure_thread_opened(ctx, thread_id):
+            not_found_ids.append(thread_id)
+            continue
+        
+        try:
+            if await move_thread_to(ctx, label):
+                moved.append(thread_id)
+            else:
+                logger.error(f"Failed to move thread {thread_id} to {label}.")
+                error_ids.append(thread_id)
+
+        except Exception as e:
+            logger.error(f"Failed to move thread {thread_id} to {label}: {e}")
+            error_ids.append(thread_id)
+            continue
+
+    page = await ctx.get_current_page()
+    current_url = await page.url
+    pat = r'https://mail\.google\.com/mail/u/(\d+)/#(inbox|sent|spam|trash)/'
+
+    match = re.search(pat, current_url)
+
+    if match:
+        profile_index = match.group(1)
+        section = match.group(2)
+        
+        if section not in ['inbox', 'sent', 'spam', 'trash']:
+            section = 'inbox'
+
+        await page.goto(f'https://mail.google.com/mail/u/{profile_index}/#{section}/', wait_until='domcontentloaded')
+
+    else:
+        await page.goto('https://mail.google.com/mail/u/0/#inbox', wait_until='domcontentloaded')
+
+    msg = f"{len(moved)} threads moved to {label}."
+
+    if error_ids:
+        msg += f" {len(error_ids)} threads failed to move: {', '.join(error_ids)}."
+
+    if not_found_ids:
+        msg += f" {len(not_found_ids)} threads not found: {', '.join(not_found_ids)}."
+
+    return response_model(result=msg, success=True)
+
 async def get_context_aware_available_toolcalls(ctx: BrowserContext):
     toolcalls = [
         {
@@ -809,6 +930,30 @@ async def get_context_aware_available_toolcalls(ctx: BrowserContext):
                 "strict": False
             }
         },
+        { # label_threads
+            'type': 'function',
+            'function': {
+                'name': 'label_threads',
+                'description': 'Label multiple email threads with a specified label.',
+                'parameters': {
+                    'type': 'object',
+                    'properties': {
+                        'thread_ids': {
+                            'type': 'string',
+                            'description': 'Comma-separated list of thread IDs to label.'
+                        },
+                        'label': {
+                            'type': 'string',
+                            'enum': ['spam', 'trash'],
+                            'description': "The label to apply to the selected threads."
+                        }
+                    },
+                    'required': ['thread_ids', 'label'],
+                    'additionalProperties': False
+                },
+                'strict': False
+            }
+        },
         {
             'type': 'function',
             'function': {
@@ -822,10 +967,11 @@ async def get_context_aware_available_toolcalls(ctx: BrowserContext):
 
     is_authorized = await check_authorization(ctx)
 
+    return toolcalls[:-1]  # Exclude sign_out if the user is authorized
+
     if is_authorized:
         return toolcalls
 
-    return toolcalls[:-1]  # Exclude sign_out if the user is authorized
 
 async def execute_toolcall(
     ctx: BrowserContext, 
@@ -853,6 +999,9 @@ async def execute_toolcall(
 
             elif tool_name == "compose_email":
                 return await compose_email(ctx, **args)
+            
+            elif tool_name == "label_threads":
+                return await label_threads(ctx, **args)
         except Exception as e:
             if isinstance(e, UnauthorizedAccess):
                 raise e
@@ -863,21 +1012,23 @@ async def execute_toolcall(
     
 async def get_current_user_identity(
     ctx: BrowserContext
-) -> ResponseMessage[dict[str, str]]:
-    response_model = ResponseMessage[dict[str, str]]
+) -> ResponseMessage[str]:
+    response_model = ResponseMessage[str]
 
     if not await check_authorization(ctx):
         return response_model(error="User is not authorized.", success=False)
 
     page = await ctx.get_current_page()
-    user_info = await page.evaluate(
-        """() => {
-            const user = window.gapi.auth2.getAuthInstance().currentUser.get();
-            return {
-                email: user.getBasicProfile().getEmail(),
-                name: user.getBasicProfile().getName()
-            };
-        }"""
-    )
+    url = page.url.strip("/")
 
-    return response_model(result=user_info, success=True)
+    if not url.startswith('https://mail.google.com'):
+        return response_model(error="User is not on Gmail page.", success=False)
+
+    element = await page.query_selector('a.gb_B.gb_Za.gb_0')
+
+    if not element:
+        return response_model(error="Failed to find the user identity element.", success=False)
+
+    user_identity = await element.get_attribute('aria-label')
+    return response_model(result=user_identity)
+        
