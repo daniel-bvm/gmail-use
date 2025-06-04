@@ -21,6 +21,7 @@ import uuid
 import openai
 from browser_use.browser.context import BrowserContextConfig
 from browser_use import BrowserSession, BrowserProfile, BrowserConfig
+import xml.etree.ElementTree as ET
 
 BROWSER_PROFILE_DIR = "/storage/browser-profiles"
 
@@ -38,15 +39,50 @@ DISPLAY = os.getenv("DISPLAY", ":99")
 NO_VNC_PORT = os.getenv("NO_VNC_PORT", 6080)
 CHROME_DEBUG_PORT = os.getenv("CHROME_DEBUG_PORT", 9222)
 
+DEFAULT_OPENBOX_CONFIG_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config>
+    <desktops>
+        <number>1</number>
+        <firstdesk>1</firstdesk>
+        <names>
+            <name>Desktop 1</name>
+        </names>
+    </desktops>
+</openbox_config>
+"""
+
+def ensure_openbox_config():
+    openbox_config_file = '~/.config/openbox/rc.xml'
+    openbox_config_file_path = os.path.expanduser(openbox_config_file)
+    os.makedirs(os.path.dirname(openbox_config_file_path), exist_ok=True)
+
+    if not os.path.exists(openbox_config_file_path):
+        with open(openbox_config_file_path, 'w') as f:
+            f.write(DEFAULT_OPENBOX_CONFIG_XML)
+
+        return
+
+    tree = ET.parse(openbox_config_file_path)
+    root = tree.getroot()
+
+    desktops = root.find("desktops")
+    if desktops is None:
+        desktops = ET.SubElement(root, "desktops")
+
+    number = desktops.find("number")
+    if number is None:
+        number = ET.SubElement(desktops, "number")
+
+    number.text = "1"
+    tree.write(openbox_config_file_path, encoding="utf-8", xml_declaration=True)
+
 # retry a process until it done with exit code = 0 or forever auto restart it
-async def observe_process(command: str, app_signal: asyncio.Event, auto_restart: bool = True, restart_delay: float = 10):
+async def observe_process(command: str, app_signal: asyncio.Event, auto_restart: bool = True, restart_delay: float = 2):
     while not app_signal.is_set():
         logger.info(f"Executing {command!r}")
 
         process = await asyncio.create_subprocess_shell(
             command,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
             shell=True,
             executable="/bin/bash"
         )
@@ -88,7 +124,8 @@ async def lifespan(app: fastapi.FastAPI):
     logger.info(f"Created {BROWSER_PROFILE_DIR}: {os.path.exists(BROWSER_PROFILE_DIR)}")
 
     tasks = []
-
+    
+    ensure_openbox_config()
 
     # Start initial processes
     tasks.append(asyncio.create_task(
@@ -100,7 +137,7 @@ async def lifespan(app: fastapi.FastAPI):
 
     tasks.append(asyncio.create_task(
         observe_process(
-            'openbox-session',
+            'openbox --reconfigure && openbox-session',
             app_signal
         )
     ))
@@ -156,10 +193,10 @@ async def lifespan(app: fastapi.FastAPI):
                     maximum_wait_page_load_time=5,
                     disable_security=False,
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
-                    viewport=dict(
-                        width=BROWSER_WINDOW_SIZE_WIDTH,
-                        height=BROWSER_WINDOW_SIZE_HEIGHT
-                    )
+                ),
+                window_size=dict(
+                    height=BROWSER_WINDOW_SIZE_HEIGHT,
+                    width=BROWSER_WINDOW_SIZE_WIDTH,
                 )
             )
         )
