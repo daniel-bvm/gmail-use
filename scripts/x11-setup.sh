@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e
+
 # Make sure DISPLAY is set
 if [ -z "$DISPLAY" ]; then
   export DISPLAY=:99
