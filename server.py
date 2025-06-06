@@ -295,7 +295,7 @@ def main():
 
     @api_app.get("/processing-url")
     async def get_processing_url():
-        http_display_url = os.getenv("HTTP_DISPLAY_URL", "http://localhost:6080/vnc.html?autoconnect=true&resize=scale&reconnect_delay=1000")
+        http_display_url = os.getenv("HTTP_DISPLAY_URL", "http://localhost:6080/vnc.html?autoconnect=true&resize=scale&reconnect_delay=1000&reconnect=1")
 
         if http_display_url:
             return JSONResponse(
