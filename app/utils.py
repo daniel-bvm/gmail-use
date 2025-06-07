@@ -199,7 +199,7 @@ def wrap_toolcall_request(uuid: str, fn_name: str, args: dict[str, Any]) -> Chat
     args_str = json.dumps(args, indent=2)
 
     template = f'''
-Executing <b>{fn_name}</b>
+<action>Executing <b>{fn_name}</b></action>
 
 <details>
 <summary>
@@ -215,8 +215,6 @@ Arguments:
 
     return ChatCompletionStreamResponse(
         id=uuid,
-        object='chat.completion.chunk',
-        created=int(time.time()),
         model='unspecified',
         choices=[
             dict(
@@ -261,8 +259,6 @@ Response:
 
     return ChatCompletionStreamResponse(
         id=uuid,
-        object='chat.completion.chunk',
-        created=int(time.time()),
         model='unspecified',
         choices=[
             dict(
